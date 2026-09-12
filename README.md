@@ -35,3 +35,10 @@ Full investigation and decisions: [`docs/kodi-stream.md`](docs/kodi-stream.md).
 Box: copy `stream-api.py` + `static/` to `/opt/kodi-stream/`, install the nginx site and systemd unit,
 `systemctl enable --now kodi-stream`. VPS: `vps/stream-auth.py` to `/opt/stream-auth/`, its unit,
 generate `/etc/stream-auth.key`, install the nginx vhost. See `docs/kodi-stream.md` for the full runbook.
+
+## Related
+- [kodi-h265-nanopi-t6](https://github.com/dgoo2308/kodi-h265-nanopi-t6) — the NanoPC-T6 (RK3588) Kodi
+  build this streams from: reproducible Kodi master + ffmpeg-rockchip, HEVC 10-bit, mainline 6.19
+  V4L2 decode, VEPU580 encoder. The box's working notebook.
+- [torrent-adder](https://github.com/dgoo2308/torrent-adder) — companion web app on the same box/tunnel.
+- [kodi-mcp-server](https://github.com/dgoo2308/kodi-mcp-server) — MCP server for Kodi integration.
