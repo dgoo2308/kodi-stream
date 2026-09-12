@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kodi stream</title>
+<style>
+  :root { color-scheme: dark; --bg:#111; --fg:#eee; --mut:#999; --acc:#4da3ff; --card:#1b1b1b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 -apple-system, system-ui, sans-serif; padding-bottom: env(safe-area-inset-bottom); }
+  header { position:sticky; top:0; z-index:5; background:#000d; backdrop-filter:blur(8px); display:flex; gap:8px; align-items:center; padding:10px 12px; }
+  header h1 { font-size:18px; margin:0 8px 0 0; }
+  header input { flex:1; min-width:0; background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; padding:8px 10px; font-size:15px; }
+  .tabs button { background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; padding:8px 10px; }
+  .tabs button.on { background:var(--acc); color:#000; border-color:var(--acc); }
+  main { padding:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(120px,1fr)); gap:12px; }
+  .card { background:var(--card); border-radius:10px; overflow:hidden; cursor:pointer; position:relative; }
+  .card img { width:100%; aspect-ratio:2/3; object-fit:cover; background:#222; display:block; }
+  .card.ep img { aspect-ratio:16/9; }
+  .card .t { padding:6px 8px; font-size:13px; line-height:1.25; }
+  .card .t small { color:var(--mut); display:block; }
+  .card .bar { position:absolute; left:0; bottom:0; height:3px; background:var(--acc); }
+  .card .seen { position:absolute; top:6px; right:6px; background:#0a0c; color:#8f8; font-size:11px; padding:2px 6px; border-radius:6px; }
+  #player { position:fixed; inset:0; background:#000; z-index:10; display:none; flex-direction:column; }
+  #player.on { display:flex; }
+  #player video { position:absolute; inset:0; width:100%; height:100%; background:#000; object-fit:contain; }
+  #pbar { position:absolute; left:0; right:0; bottom:0; z-index:2; display:flex; gap:10px; align-items:center; padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px)); background:linear-gradient(to top,#000f,#0008 55%,#0000); color:#eee; font-size:13px; flex-wrap:wrap; }
+  #pbar { opacity:1; transition:opacity .25s ease; }
+  #player.hidebar #pbar { opacity:0; pointer-events:none; }
+  #player.hidebar { cursor:none; }
+  #pbar button, #pbar select { background:#222; color:var(--fg); border:1px solid #444; border-radius:8px; padding:6px 10px; }
+  #seek { flex:1; min-width:160px; }
+  #ptitle { width:100%; color:#fff; font-weight:600; }
+  #msg { color:#fc6; }
+  #detail { position:fixed; inset:auto 0 0 0; background:#181818; border-top:1px solid #333; padding:14px 16px 24px; z-index:6; display:none; }
+  #detail.on { display:block; }
+  #detail h2 { margin:0 0 6px; font-size:17px; }
+  #detail .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  #detail button, #detail select { background:#222; color:var(--fg); border:1px solid #444; border-radius:8px; padding:8px 12px; font-size:15px; }
+  #detail button.primary { background:var(--acc); color:#000; border-color:var(--acc); font-weight:600; }
+  #detail .info { color:var(--mut); font-size:13px; }
+  .empty { color:var(--mut); padding:30px; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kodi</h1>
+  <input id="q" type="search" placeholder="Search…" autocomplete="off">
+  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button></div>
+</header>
+<main><div id="crumb" style="color:var(--mut);margin:0 0 8px;display:none"></div><div id="grid" class="grid"></div></main>
+
+<div id="detail">
+  <h2 id="dTitle"></h2>
+  <div class="info" id="dInfo">…</div>
+  <div class="row">
+    <label>Audio <select id="dAudio"></select></label>
+    <label>Subtitles <select id="dSub"><option value="">none</option></select></label>
+    <label>Encoder <select id="dEnc"><option value="x264">SW (x264)</option><option value="rkmpp">HW (rkmpp)</option></select></label>
+  </div>
+  <div class="row">
+    <button class="primary" id="dResume" style="display:none">Resume</button>
+    <button class="primary" id="dPlay">Play from start</button>
+    <button id="dClose">Close</button>
+  </div>
+</div>
+
+<div id="player">
+  <video id="video" playsinline autoplay></video>
+  <div id="pbar">
+    <div id="ptitle"></div>
+    <button id="bPlay">⏸</button>
+    <span id="tcur">0:00</span>
+    <input id="seek" type="range" min="0" max="1000" value="0">
+    <span id="tdur">0:00</span>
+    <button id="bBack">−15s</button><button id="bFwd">+30s</button>
+    <select id="pAudio" title="Audio" style="max-width:150px"></select>
+    <select id="pSub" title="Subtitles" style="max-width:150px"></select>
+    <button id="bFull">⛶</button>
+    <button id="bStop">Stop</button>
+    <span id="msg"></span>
+  </div>
+</div>
+
+<script src="hls.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, opt) => fetch('/api' + p, opt).then(r => r.json());
+const post = (p, body) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+const fmt = s => { s = Math.max(0, Math.floor(s||0)); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return (h? h+':'+String(m).padStart(2,'0') : m) + ':' + String(x).padStart(2,'0'); };
+let tab = 'movie', showId = null, cur = null;
+{ const e = new URLSearchParams(location.search).get('enc'); if (e === 'x264' || e === 'rkmpp') setTimeout(() => { $('#dEnc').value = e; }, 0); }
+
+// ---------------- catalogue
+function card(it) {
+  const d = document.createElement('div');
+  d.className = 'card' + (it.type === 'episode' ? ' ep' : '');
+  const pct = it.total ? Math.min(100, 100 * (it.resume||0) / it.total) : 0;
+  const sub = it.type === 'episode' ? `S${it.season}E${it.episode}` : (it.year || '');
+  d.innerHTML = `<img loading="lazy" src="${it.poster || ''}" alt=""><div class="t">${it.title}<small>${sub}</small></div>` +
+    (pct ? `<div class="bar" style="width:${pct}%"></div>` : '') + (it.playCount ? '<div class="seen">✓</div>' : '');
+  d.onclick = () => it.type === 'show' ? openShow(it) : openItem(it);
+  return d;
+}
+async function load() {
+  const q = encodeURIComponent($('#q').value.trim());
+  const grid = $('#grid'); grid.innerHTML = '<div class="empty">Loading…</div>';
+  let items;
+  if (tab === 'movie') { $('#crumb').style.display = 'none'; items = await api(`/movies?q=${q}&limit=200`); }
+  else if (showId) { items = await api(`/shows/${showId}/episodes`); }
+  else { $('#crumb').style.display = 'none'; items = await api(`/shows?q=${q}&limit=300`); }
+  grid.innerHTML = '';
+  if (!items.length) grid.innerHTML = '<div class="empty">Nothing found</div>';
+  items.forEach(it => grid.appendChild(card(it)));
+}
+function openShow(s) { showId = s.id; $('#crumb').style.display = 'block'; $('#crumb').innerHTML = `<a href="#" id="back">◀ Shows</a> / ${s.title}`; $('#back').onclick = e => { e.preventDefault(); showId = null; load(); }; load(); }
+$('#q').oninput = () => { clearTimeout(window._t); window._t = setTimeout(load, 300); };
+$('#tabM').onclick = () => { tab = 'movie'; showId = null; $('#tabM').classList.add('on'); $('#tabS').classList.remove('on'); load(); };
+$('#tabS').onclick = () => { tab = 'show'; showId = null; $('#tabS').classList.add('on'); $('#tabM').classList.remove('on'); load(); };
+
+// ---------------- detail sheet
+async function openItem(it) {
+  cur = { type: it.type, id: it.id, title: it.type === 'episode' ? `${it.show} S${it.season}E${it.episode} · ${it.title}` : it.title };
+  $('#dTitle').textContent = cur.title; $('#dInfo').textContent = 'Probing…'; $('#detail').classList.add('on');
+  const d = await api(`/item/${it.type}/${it.id}`);
+  cur.meta = d;
+  if (!d.available) { $('#dInfo').textContent = 'File not available (LaCie unplugged?)'; return; }
+  const v = d.probe.video || {};
+  $('#dInfo').textContent = `${v.codec} ${v.width}×${v.height} ${v.pix_fmt} · ${fmt(d.probe.duration)} · ${(d.probe.bit_rate/1e6).toFixed(1)} Mbps` + (d.resume ? ` · resume at ${fmt(d.resume)}` : '');
+  const a = $('#dAudio'); a.innerHTML = '';
+  d.probe.audio.forEach(s => { const o = document.createElement('option'); o.value = s.index; o.textContent = `${s.lang||'?'} ${s.codec} ${s.channels||''}ch ${s.title||''}`; a.appendChild(o); });
+  const eng = d.probe.audio.find(s => s.lang === 'eng'); if (eng) a.value = eng.index;
+  const sb = $('#dSub'); sb.innerHTML = '<option value="">none</option>';
+  d.probe.subs.filter(s => s.text).forEach(s => { const o = document.createElement('option'); o.value = s.path ? 'ext:' + s.path : s.index; o.textContent = `${s.lang||'?'} ${s.codec}${s.path ? ' (file)' : ''} ${s.title||''}`; sb.appendChild(o); });
+  $('#dResume').style.display = d.resume > 0 ? '' : 'none';
+  $('#dResume').textContent = `Resume ${fmt(d.resume)}`;
+}
+$('#dClose').onclick = () => $('#detail').classList.remove('on');
+$('#dPlay').onclick = () => startPlay(0);
+$('#dResume').onclick = () => startPlay(cur.meta.resume);
+
+// ---------------- player
+const video = $('#video'); let hls = null, offset = 0, duration = 0, mode = '', ticker = null, lastSave = 0;
+function absPos() { return offset + (video.currentTime || 0); }
+async function startPlay(at) {
+  $('#detail').classList.remove('on'); $('#player').classList.add('on'); $('#ptitle').textContent = cur.title; $('#msg').textContent = 'Starting…';
+  const res = await post('/play', { type: cur.type, id: cur.id, offset: at, audio: Number($('#dAudio').value), sub: $('#dSub').value || null, enc: $('#dEnc').value });
+  if (res.error) { $('#msg').textContent = res.error; return; }
+  mode = res.mode; duration = res.duration || cur.meta.probe.duration; offset = res.offset || 0;
+  $('#tdur').textContent = fmt(duration); $('#msg').textContent = '';
+  syncPlayerSubs();
+  attach(res.url, at);
+  clearInterval(ticker); ticker = setInterval(tick, 1000);
+}
+function attach(url, at) {
+  if (hls) { hls.destroy(); hls = null; }
+  if (mode === 'direct') { video.src = url; video.currentTime = at || 0; video.play().catch(()=>{}); return; }
+  const start = () => {
+    if (!(window.Hls && Hls.isSupported())) {  // iOS Safari: no MSE, native HLS
+      if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = url; video.play().catch(()=>{}); }
+      else $('#msg').textContent = 'HLS not supported by this browser';
+      return;
+    }
+    hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 6, maxBufferLength: 20, enableWorker: true });
+    hls.loadSource(url); hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(()=>{}); if (hls.subtitleTracks.length) hls.subtitleTrack = 0; });
+    hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) { $('#msg').textContent = 'stream error: ' + d.type; if (d.type === 'networkError') setTimeout(() => hls && hls.startLoad(), 1500); } });
+  };
+  // wait for the master playlist to exist
+  (async function poll(n) {
+    const s = await api('/session');
+    if (s.ready) return start();
+    if (!s.alive) { $('#msg').textContent = 'encoder stopped: ' + (s.error || 'see log'); return; }
+    if (n < 40) setTimeout(() => poll(n+1), 500); else $('#msg').textContent = 'timeout waiting for stream';
+  })(0);
+}
+function tick() {
+  if (!$('#player').classList.contains('on')) return;
+  const pos = absPos(); $('#tcur').textContent = fmt(pos);
+  if (duration && !$('#seek').dragging) $('#seek').value = Math.round(1000 * pos / duration);
+  if (Date.now() - lastSave > 30000 && !video.paused) saveProgress();
+}
+function saveProgress(beacon) {
+  lastSave = Date.now(); const body = JSON.stringify({ type: cur.type, id: cur.id, position: absPos(), duration });
+  if (beacon && navigator.sendBeacon) navigator.sendBeacon('/api/progress', new Blob([body], {type:'application/json'}));
+  else fetch('/api/progress', { method:'POST', headers:{'Content-Type':'application/json'}, body });
+}
+async function seekTo(t) {
+  t = Math.max(0, Math.min(duration - 5, t));
+  if (mode === 'direct') { video.currentTime = t; return; }
+  $('#msg').textContent = 'seeking…'; saveProgress();
+  const res = await post('/play', { type: cur.type, id: cur.id, offset: t, audio: Number($('#dAudio').value), sub: $('#dSub').value || null, enc: $('#dEnc').value });
+  if (res.error) { $('#msg').textContent = res.error; return; }
+  offset = res.offset; $('#msg').textContent = ''; attach(res.url, t);
+}
+$('#seek').oninput = e => { e.target.dragging = true; $('#tcur').textContent = fmt(duration * e.target.value / 1000); };
+$('#seek').onchange = e => { e.target.dragging = false; seekTo(duration * e.target.value / 1000); };
+$('#bBack').onclick = () => seekTo(absPos() - 15);
+$('#bFwd').onclick = () => seekTo(absPos() + 30);
+$('#bPlay').onclick = () => { if (video.paused) video.play(); else { video.pause(); saveProgress(); } };
+video.onplay = () => $('#bPlay').textContent = '⏸'; video.onpause = () => $('#bPlay').textContent = '▶';
+$('#bFull').onclick = () => { const el = $('#player'); (el.requestFullscreen || el.webkitRequestFullscreen || video.webkitEnterFullscreen || (()=>{})).call(el.requestFullscreen ? el : video); };
+$('#bStop').onclick = stopPlay;
+async function stopPlay() {
+  saveProgress(); clearInterval(ticker); if (hls) { hls.destroy(); hls = null; } video.pause(); video.removeAttribute('src'); video.load();
+  $('#player').classList.remove('on'); await post('/stop', {}); load();
+}
+
+// auto-hide the control bar during playback; show on mouse move / tap / pause
+let barTimer;
+function showBar() {
+  const pl = $('#player'); pl.classList.remove('hidebar');
+  clearTimeout(barTimer);
+  barTimer = setTimeout(() => { if (!video.paused) pl.classList.add('hidebar'); }, 3000);
+}
+$('#player').addEventListener('mousemove', showBar);
+$('#player').addEventListener('touchstart', showBar, { passive: true });
+$('#player').addEventListener('click', showBar);
+video.addEventListener('pause', () => { clearTimeout(barTimer); $('#player').classList.remove('hidebar'); });
+video.addEventListener('play', showBar);
+
+// in-player subtitle picker: mirror the detail list, switch by restarting at the current position
+function syncPlayerSubs() {
+  for (const [pid, did] of [['#pAudio', '#dAudio'], ['#pSub', '#dSub']]) {
+    const p = $(pid), d = $(did);
+    p.innerHTML = d.innerHTML; p.value = d.value;
+    p.style.display = p.options.length > 1 ? '' : 'none';
+  }
+}
+$('#pAudio').onchange = () => { $('#dAudio').value = $('#pAudio').value; seekTo(absPos()); };
+$('#pSub').onchange = () => { $('#dSub').value = $('#pSub').value; seekTo(absPos()); };
+video.onended = () => { saveProgress(); };
+window.addEventListener('pagehide', () => { if ($('#player').classList.contains('on')) saveProgress(true); });
+load();
+</script>
+</body>
+</html>

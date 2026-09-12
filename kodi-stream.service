@@ -1,0 +1,24 @@
+[Unit]
+Description=kodi-stream: on-demand HLS streaming of the Kodi library
+After=network-online.target home.mount var-media-lacie.mount
+Wants=network-online.target
+RequiresMountsFor=/home /var/media/lacie
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=video render media
+WorkingDirectory=/opt/kodi-stream
+ExecStart=/usr/bin/python3 /opt/kodi-stream/stream-api.py
+ExecStopPost=/bin/sh -c 'pkill -f "kodi-stream-run" || true'
+Restart=always
+RestartSec=5
+# Kodi and the 3.7 GB box come first
+MemoryMax=1200M
+Nice=10
+CPUWeight=50
+IOWeight=50
+
+[Install]
+WantedBy=multi-user.target

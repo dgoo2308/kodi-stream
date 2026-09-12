@@ -1,0 +1,14 @@
+[Unit]
+Description=stream.nellika.io cookie login (form auth -> signed cookie, htpasswd-backed)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3.9 /opt/stream-auth/stream-auth.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
