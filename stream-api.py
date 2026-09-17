@@ -11,6 +11,7 @@ Standard library only, like /opt/torrent-api.
 """
 import base64
 import glob
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,9 @@ CONFIG = {
     "db_glob": "/home/pi/.kodi/userdata/Database/MyVideos*.db",
     "run_dir": "/home/pi/kodi-stream-run",
     "media_root": "/var/media/lacie/Media",      # nginx internal alias /media/ -> this
+    "thumb_cache": "/home/pi/kodi-stream-thumbs", # on-disk cache of fetched remote posters
+    "thumb_max_age": 31536000,                   # browser/CDN cache lifetime for thumbs (1 year)
+    "thumb_tmdb_size": "w342",                   # downsize TMDB posters from 'original' to this
     "ffmpeg_decode": "/usr/local/bin/ffmpeg",    # mainline 8.1: v4l2request HW decode
     "ffprobe": "/usr/local/bin/ffprobe",
     "ffmpeg_encode": "/opt/ffmpeg-rkmpp/bin/ffmpeg",  # ffmpeg-rockchip: h264_rkmpp + hls
@@ -101,7 +105,7 @@ MOVIE_VIEW_DEFAULT_FILTER = " AND isDefaultVersion = 1" if has_column("movie_vie
 
 def movies(q="", limit=60, offset=0):
     like = "%%%s%%" % q if q else ""
-    return rows(
+    return _proxy_posters(rows(
         """SELECT m.idMovie AS id, 'movie' AS type, m.idFile, m.c00 AS title,
                   substr(m.premiered,1,4) AS year, m.c11 AS runtime,
                   m.strPath||m.strFileName AS path,
@@ -112,22 +116,22 @@ def movies(q="", limit=60, offset=0):
            WHERE (? = '' OR m.c00 LIKE ?)""" + MOVIE_VIEW_DEFAULT_FILTER + """
            ORDER BY CASE WHEN ? = '' THEN m.dateAdded END DESC, m.c00
            LIMIT ? OFFSET ?""",
-        (q, like, q, limit, offset))
+        (q, like, q, limit, offset)))
 
 
 def shows(q="", limit=100, offset=0):
     like = "%%%s%%" % q if q else ""
-    return rows(
+    return _proxy_posters(rows(
         """SELECT s.idShow AS id, 'show' AS type, s.c00 AS title, substr(s.c05,1,4) AS year,
                   s.totalCount, s.watchedcount, s.totalSeasons,
                   (SELECT url FROM art WHERE media_type='tvshow' AND media_id=s.idShow AND type='poster') AS poster
            FROM tvshow_view s WHERE (? = '' OR s.c00 LIKE ?)
            ORDER BY s.c00 LIMIT ? OFFSET ?""",
-        (q, like, limit, offset))
+        (q, like, limit, offset)))
 
 
 def episodes(show_id):
-    return rows(
+    return _proxy_posters(rows(
         """SELECT e.idEpisode AS id, 'episode' AS type, e.idFile, e.c00 AS title,
                   CAST(e.c12 AS INTEGER) AS season, CAST(e.c13 AS INTEGER) AS episode,
                   e.strTitle AS show, e.strPath||e.strFileName AS path,
@@ -135,7 +139,7 @@ def episodes(show_id):
                   (SELECT url FROM art WHERE media_type='episode' AND media_id=e.idEpisode AND type='thumb') AS poster
            FROM episode_view e WHERE e.idShow = ?
            ORDER BY season, episode""",
-        (show_id,))
+        (show_id,)))
 
 
 def item(kind, ident):
@@ -151,6 +155,76 @@ def item(kind, ident):
     else:
         r = []
     return r[0] if r else None
+
+
+# ----------------------------------------------------------------------------- thumbnails
+# The Kodi art table stores raw poster URLs from mixed hosts (image.tmdb.org,
+# assets.fanart.tv, thetvdb.com over http) plus local file paths. Loading those
+# straight from the browser means: full-size TMDB originals, http mixed-content
+# blocked on the https site, and local paths that don't resolve at all. Instead the
+# catalogue hands the client /api/thumb/<kind>/<id>; the box resolves the real URL
+# from its own DB (so this is not an open proxy), downsizes TMDB, caches remote
+# images on disk once, and serves everything with a 1-year immutable cache.
+_ART = {"movie": ("movie", "poster"), "show": ("tvshow", "poster"), "episode": ("episode", "thumb")}
+
+
+def art_url(kind, ident):
+    spec = _ART.get(kind)
+    if not spec:
+        return None
+    r = rows("SELECT url FROM art WHERE media_type=? AND media_id=? AND type=? LIMIT 1",
+             (spec[0], ident, spec[1]))
+    return r[0]["url"] if r and r[0].get("url") else None
+
+
+def _proxy_posters(items):
+    """Rewrite each row's raw poster URL to the cached /api/thumb endpoint."""
+    for it in items:
+        it["poster"] = "/api/thumb/%s/%s" % (it["type"], it["id"]) if it.get("poster") else ""
+    return items
+
+
+def _thumb_ext(url):
+    ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+    return ext if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
+
+
+def _thumb_ctype(ext):
+    return {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}.get(ext, "image/jpeg")
+
+
+def ensure_thumb(url):
+    """Cache a poster (remote URL or local file) on disk once; return (cache_path,
+    content_type) or None. TMDB originals are downsized; local files must sit under the
+    media root. Everything ends up in one cache dir so nginx serves it uniformly."""
+    remote = url.startswith("http")
+    if remote:
+        url = re.sub(r"/t/p/(original|w\d+)/", "/t/p/%s/" % CONFIG["thumb_tmdb_size"], url)
+    ext = _thumb_ext(url)
+    os.makedirs(CONFIG["thumb_cache"], exist_ok=True)
+    key = hashlib.sha1(url.encode()).hexdigest() + ext
+    path = os.path.join(CONFIG["thumb_cache"], key)
+    ctype = _thumb_ctype(ext)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path, ctype
+    tmp = path + ".tmp"
+    if remote:
+        req = urllib.request.Request(url, headers={"User-Agent": "kodi-stream/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            ct = r.headers.get("Content-Type", "")
+            if not ct.startswith("image/"):
+                return None
+            data = r.read(8 * 1024 * 1024)  # cap 8 MB
+            ctype = ct.split(";")[0] or ctype
+        with open(tmp, "wb") as f:
+            f.write(data)
+    else:
+        real = os.path.abspath(url)
+        if not (real.startswith(CONFIG["media_root"] + os.sep) and os.path.isfile(real)):
+            return None
+        shutil.copyfile(real, tmp)
+    os.replace(tmp, path)
+    return path, ctype
 
 
 # ----------------------------------------------------------------------------- probing
@@ -674,6 +748,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
                 self.send_header("X-Accel-Redirect", "/media/" + urllib.parse.quote(rel))
+                self.end_headers()
+                return
+            m = re.match(r"^/api/thumb/(movie|show|episode)/(\d+)$", p)
+            if m:
+                raw = art_url(m.group(1), int(m.group(2)))
+                got = None
+                if raw:
+                    try:
+                        got = ensure_thumb(raw)
+                    except Exception as e:
+                        log("thumb %s failed: %r" % (raw[:80], e))
+                if not got:
+                    return self.send_json({"error": "no art"}, 404)
+                cpath, ctype = got
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "public, max-age=%d, immutable" % CONFIG["thumb_max_age"])
+                self.send_header("X-Accel-Redirect", "/thumbcache/" + urllib.parse.quote(os.path.basename(cpath)))
                 self.end_headers()
                 return
             if p == "/api/session":

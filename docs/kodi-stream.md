@@ -157,3 +157,26 @@ the mainline v4l2 ffmpeg (tried nv12, p010le, raw). So 10-bit streams decode in 
 - Encoder single-core (`max_cores=1`) — plenty. Never live-reload `rkvenc`.
 - Phase 2: next-episode, watched filter, "continue watching" row, external `.srt` for episodes,
   low-bitrate variant, HEVC variant for Safari, frp bandwidth check.
+
+## Thumbnail caching (2026-09-17)
+Posters in the Kodi `art` table come from mixed hosts (image.tmdb.org — full-size `original`,
+assets.fanart.tv, thetvdb.com over **http**) and some are **local file paths**. Loaded straight from
+the browser that meant large downloads, http mixed-content blocked on the https site, and local
+posters that never resolved. Fixed with a caching thumbnail **proxy** on the box (three layers):
+
+1. **Site/app** — the catalogue returns `poster: /api/thumb/<kind>/<id>` instead of the raw URL.
+   `GET /api/thumb/(movie|show|episode)/<id>` resolves the real art URL from the box's own DB (so it
+   is not an open proxy), downsizes TMDB `original` → `w342`, fetches remote images (or copies local
+   ones) into `/home/pi/kodi-stream-thumbs` once, and answers `X-Accel-Redirect: /thumbcache/<file>`
+   with `Cache-Control: public, max-age=31536000, immutable`. Also repairs the previously-broken
+   local + http posters.
+2. **nginx (box)** — internal `location /thumbcache/` serves the cached file from disk (the app's
+   immutable Cache-Control is forwarded through the redirect). The CDN is hit at most once per poster.
+3. **Browser** — the immutable 1-year Cache-Control means each device re-uses its cache with no
+   network after first view.
+
+Deploy: `cp stream-api.py /opt/kodi-stream/ && cp nginx-kodi-stream.conf /etc/nginx/sites-available/kodi-stream`,
+`install -d -o pi -g pi /home/pi/kodi-stream-thumbs`, `nginx -t && systemctl reload nginx`,
+`systemctl restart kodi-stream`. (index.html unchanged — it already uses `it.poster` with lazy load.)
+Optional later: VPS `proxy_cache` on `/api/thumb/` for first-load on a new device (needs the auth
+block replicated on that location). To purge: `rm -rf /home/pi/kodi-stream-thumbs/*`.
