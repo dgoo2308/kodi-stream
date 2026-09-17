@@ -210,11 +210,22 @@ def ensure_thumb(url):
     tmp = path + ".tmp"
     if remote:
         req = urllib.request.Request(url, headers={"User-Agent": "kodi-stream/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=6) as r:
             ct = r.headers.get("Content-Type", "")
             if not ct.startswith("image/"):
                 return None
-            data = r.read(8 * 1024 * 1024)  # cap 8 MB
+            # bounded read: some hosts (fanart.tv) trickle from the box; a total deadline
+            # makes a stalled fetch fail fast instead of hanging nginx into a 504.
+            deadline = time.time() + 15
+            buf = bytearray()
+            while len(buf) < 8 * 1024 * 1024:
+                if time.time() > deadline:
+                    raise TimeoutError("thumb fetch budget exceeded")
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            data = bytes(buf)
             ctype = ct.split(";")[0] or ctype
         with open(tmp, "wb") as f:
             f.write(data)
@@ -687,6 +698,36 @@ def save_progress(kind, ident, position, duration):
             con.close()
 
 
+# ----------------------------------------------------------------------------- thumb prewarm
+def warm_thumbs():
+    """Background: fill the thumbnail cache for the browse grids (movies + shows) so live
+    requests are cache hits. Flaky hosts (fanart.tv trickles from the box) get one retry."""
+    time.sleep(5)
+    try:
+        items = movies("", 100000, 0) + shows("", 100000, 0)
+    except Exception as e:
+        log("thumb prewarm: catalogue failed: %r" % e)
+        return
+    cached = missed = 0
+    for it in items:
+        if not it.get("poster"):
+            continue
+        raw = art_url(it["type"], it["id"])
+        if not raw:
+            continue
+        for attempt in (1, 2):
+            try:
+                if ensure_thumb(raw):
+                    cached += 1
+                break
+            except Exception:
+                if attempt == 2:
+                    missed += 1
+                time.sleep(1)
+        time.sleep(0.05)
+    log("thumb prewarm done: cached=%d missed=%d of %d" % (cached, missed, len(items)))
+
+
 # ----------------------------------------------------------------------------- http
 SESSIONS = SessionManager()
 
@@ -799,4 +840,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     log("kodi-stream on %s:%d, db %s, run dir %s" % (CONFIG["bind"], CONFIG["port"], db_path(), CONFIG["run_dir"]))
+    threading.Thread(target=warm_thumbs, daemon=True).start()
     ThreadingHTTPServer((CONFIG["bind"], CONFIG["port"]), Handler).serve_forever()

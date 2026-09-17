@@ -180,3 +180,14 @@ Deploy: `cp stream-api.py /opt/kodi-stream/ && cp nginx-kodi-stream.conf /etc/ng
 `systemctl restart kodi-stream`. (index.html unchanged — it already uses `it.poster` with lazy load.)
 Optional later: VPS `proxy_cache` on `/api/thumb/` for first-load on a new device (needs the auth
 block replicated on that location). To purge: `rm -rf /home/pi/kodi-stream-thumbs/*`.
+
+### Deployed 2026-09-17 + robustness
+Live on the box (reached via the frp SSH jump `ssh -J nell_remote_root root@127.0.0.1 -p 6043`).
+Verified: posters now `/api/thumb/...`; local + http posters fixed (200, immutable); TMDB downsized
+(~56 KB). Two robustness additions after finding **fanart.tv trickles intermittently from the box**
+(one fetch 6 KB/s, the next 343 KB/s): (1) the remote fetch has a 15 s total budget so a stall fails
+fast (logged `thumb fetch budget exceeded`) instead of hanging nginx to a 504; (2) a background
+`warm_thumbs()` thread pre-fills the cache for movies + shows on startup (one retry per poster), so
+browse grids are cache hits and flaky fanart posters get another chance. Persistently-flaky fanart
+posters fill in on a later request/restart. Cache: `/home/pi/kodi-stream-thumbs` (purge = empty it).
+Open item: box↔assets.fanart.tv is intermittently slow (route/OVH); not blocking (retries + cache).
