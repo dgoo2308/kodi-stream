@@ -103,31 +103,74 @@ def has_column(table, col):
 MOVIE_VIEW_DEFAULT_FILTER = " AND isDefaultVersion = 1" if has_column("movie_view", "isDefaultVersion") else ""
 
 
-def movies(q="", limit=60, offset=0):
-    like = "%%%s%%" % q if q else ""
+# sort keys the client may ask for -> fixed ORDER BY clauses (never interpolate client input).
+# {a} is the view alias, {y} its premiere-date column. SQLite sorts NULL lowest, so DESC puts it last.
+SORTS = {
+    "added":   "{a}.dateAdded DESC, {a}.c00 COLLATE NOCASE",
+    "title":   "{a}.c00 COLLATE NOCASE",
+    "year":    "{y} DESC, {a}.c00 COLLATE NOCASE",
+    # votes are 0 for many scrapes (even classics), so only a known-tiny sample (1-19 votes) or a
+    # perfect 10 (practically always 1-2 votes) is pushed below the rest instead of topping the list
+    "rating":  "coalesce({a}.rating >= 10 OR ({a}.votes > 0 AND {a}.votes < 20), 0), {a}.rating DESC, {a}.c00 COLLATE NOCASE",
+    "watched": "{a}.lastPlayed IS NULL, {a}.lastPlayed DESC, {a}.c00 COLLATE NOCASE",
+}
+MAX_LIMIT = 500
+
+
+def _catalogue_filters(alias, idcol, media_type, q, genre, unwatched_sql, unwatched):
+    """WHERE fragments + args shared by movies() and shows()."""
+    where, args = [], []
+    if q:
+        where.append("%s.c00 LIKE ?" % alias)
+        args.append("%%%s%%" % q)
+    if genre:
+        where.append("EXISTS (SELECT 1 FROM genre_link gl JOIN genre g ON g.genre_id = gl.genre_id"
+                     " WHERE gl.media_id = %s.%s AND gl.media_type = '%s' AND g.name = ?)" % (alias, idcol, media_type))
+        args.append(genre)
+    if unwatched:
+        where.append(unwatched_sql)
+    return "".join(" AND " + w for w in where), args
+
+
+def movies(q="", limit=60, offset=0, sort="added", genre="", unwatched=False):
+    where, args = _catalogue_filters("m", "idMovie", "movie", q, genre,
+                                     "(m.playCount IS NULL OR m.playCount = 0)", unwatched)
+    order = SORTS.get(sort, SORTS["added"]).format(a="m", y="m.premiered")
     return _proxy_posters(rows(
         """SELECT m.idMovie AS id, 'movie' AS type, m.idFile, m.c00 AS title,
-                  substr(m.premiered,1,4) AS year, m.c11 AS runtime,
+                  substr(m.premiered,1,4) AS year, m.c11 AS runtime, m.c14 AS genre,
+                  round(m.rating, 1) AS rating,
                   m.strPath||m.strFileName AS path,
                   m.resumeTimeInSeconds AS resume, m.totalTimeInSeconds AS total,
                   m.playCount, m.lastPlayed, m.dateAdded,
                   (SELECT url FROM art WHERE media_type='movie' AND media_id=m.idMovie AND type='poster') AS poster
            FROM movie_view m
-           WHERE (? = '' OR m.c00 LIKE ?)""" + MOVIE_VIEW_DEFAULT_FILTER + """
-           ORDER BY CASE WHEN ? = '' THEN m.dateAdded END DESC, m.c00
+           WHERE 1=1""" + MOVIE_VIEW_DEFAULT_FILTER + where + """
+           ORDER BY """ + order + """
            LIMIT ? OFFSET ?""",
-        (q, like, q, limit, offset)))
+        (*args, max(1, min(limit, MAX_LIMIT)), max(0, offset))))
 
 
-def shows(q="", limit=100, offset=0):
-    like = "%%%s%%" % q if q else ""
+def shows(q="", limit=100, offset=0, sort="added", genre="", unwatched=False):
+    where, args = _catalogue_filters("s", "idShow", "tvshow", q, genre,
+                                     "s.watchedcount < s.totalCount", unwatched)
+    order = SORTS.get(sort, SORTS["added"]).format(a="s", y="s.c05")
     return _proxy_posters(rows(
         """SELECT s.idShow AS id, 'show' AS type, s.c00 AS title, substr(s.c05,1,4) AS year,
-                  s.totalCount, s.watchedcount, s.totalSeasons,
+                  s.c08 AS genre, round(s.rating, 1) AS rating,
+                  s.totalCount, s.watchedcount, s.totalSeasons, s.dateAdded,
                   (SELECT url FROM art WHERE media_type='tvshow' AND media_id=s.idShow AND type='poster') AS poster
-           FROM tvshow_view s WHERE (? = '' OR s.c00 LIKE ?)
-           ORDER BY s.c00 LIMIT ? OFFSET ?""",
-        (q, like, limit, offset)))
+           FROM tvshow_view s
+           WHERE 1=1""" + where + """
+           ORDER BY """ + order + """
+           LIMIT ? OFFSET ?""",
+        (*args, max(1, min(limit, MAX_LIMIT)), max(0, offset))))
+
+
+def genres(media_type):
+    """Genres present in the library for 'movie' or 'tvshow', most used first."""
+    return rows("""SELECT g.name, count(*) AS count FROM genre g JOIN genre_link gl ON gl.genre_id = g.genre_id
+                   WHERE gl.media_type = ? GROUP BY g.name ORDER BY count DESC, g.name""", (media_type,))
 
 
 def episodes(show_id):
@@ -759,10 +802,13 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/health":
                 return self.send_json({"ok": True, "db": os.path.basename(db_path()), "session": SESSIONS.status(),
                                        "mem_available_kb": mem_available_kb()})
-            if p == "/api/movies":
-                return self.send_json(movies(q.get("q", [""])[0], int(q.get("limit", [60])[0]), int(q.get("offset", [0])[0])))
-            if p == "/api/shows":
-                return self.send_json(shows(q.get("q", [""])[0], int(q.get("limit", [100])[0]), int(q.get("offset", [0])[0])))
+            if p in ("/api/movies", "/api/shows"):
+                arg = lambda k, d="": q.get(k, [d])[0]
+                fn = movies if p == "/api/movies" else shows
+                return self.send_json(fn(arg("q"), int(arg("limit", 60)), int(arg("offset", 0)),
+                                         arg("sort", "added"), arg("genre"), arg("unwatched") == "1"))
+            if p == "/api/genres":
+                return self.send_json(genres("tvshow" if q.get("type", ["movie"])[0] in ("tvshow", "show") else "movie"))
             m = re.match(r"^/api/shows/(\d+)/episodes$", p)
             if m:
                 return self.send_json(episodes(int(m.group(1))))

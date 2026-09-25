@@ -6,7 +6,9 @@ H.264 + AAC HLS stream with subtitle and audio-track selection, resume shared wi
 iOS-Keychain-friendly cookie login. Companion to [torrent-adder](https://github.com/dgoo2308/torrent-adder).
 
 ## What it does
-- **Catalogue** from Kodi's `MyVideos*.db` (read-only): movies, shows, seasons, episodes, posters, search.
+- **Catalogue** from Kodi's `MyVideos*.db` (read-only): movies, shows, seasons, episodes, posters, search,
+  sort (recently added / title / release / top rated / recently watched), genre and unwatched filters,
+  infinite scroll over the whole library.
 - **Playback** decided per item: direct play, remux, or transcode to 720p on the fly, real-time paced,
   as a rolling HLS window on the NVMe (nothing persisted).
 - **Player** (single page, `static/index.html` + vendored hls.js): full-movie seek, ±skip, audio &
@@ -14,7 +16,8 @@ iOS-Keychain-friendly cookie login. Companion to [torrent-adder](https://github.
 - **Resume + watched** shared with Kodi (JSON-RPC when Kodi runs, the library DB `bookmark`/`files`
   rows when it does not), both directions.
 - **Access**: reverse-proxied via frp to a VPS; a cookie login form (Keychain-friendly) with HTTP
-  Basic auth as fallback (`vps/`).
+  Basic auth as fallback (`vps/`). At home: `http://kodi.local` (avahi mDNS), no login, private
+  IPv4 ranges only (`nginx-kodi-stream-lan.conf`, a separate server block so the frp target is untouched).
 
 ## Encoder note (important)
 Video is encoded with **software x264** by default. The RK3588 VEPU580 hardware encoder was
@@ -27,13 +30,15 @@ Full investigation and decisions: [`docs/kodi-stream.md`](docs/kodi-stream.md).
 ## Layout
 - `stream-api.py` — the service (stdlib `ThreadingHTTPServer`): catalogue, session manager, resume sync.
 - `static/` — the player page + vendored `hls.min.js`.
-- `nginx-kodi-stream.conf` — box nginx site (static + `/hls/` + `/api/` proxy + internal `/media/`).
+- `nginx-kodi-stream.conf` — box nginx site for the frp tunnel (127.0.0.1:8088: static + `/hls/` + `/api/` proxy + internal `/media/`).
+- `nginx-kodi-stream-lan.conf` — box nginx site for the LAN (`:80`, `kodi.local`); same locations, keep the two in step.
 - `kodi-stream.service` — systemd unit (user `pi`, memory/CPU caps).
 - `vps/` — VPS side: `stream-auth.py` (cookie login), its unit, and the `stream.nellika.io` nginx vhost.
 
 ## Deploy (summary)
 Box: copy `stream-api.py` + `static/` to `/opt/kodi-stream/`, install the nginx site and systemd unit,
-`systemctl enable --now kodi-stream`. VPS: `vps/stream-auth.py` to `/opt/stream-auth/`, its unit,
+`systemctl enable --now kodi-stream`. LAN: `nginx-kodi-stream-lan.conf` → `/etc/nginx/sites-available/kodi-stream-lan`,
+symlink into `sites-enabled`, `nginx -t && systemctl reload nginx`. VPS: `vps/stream-auth.py` to `/opt/stream-auth/`, its unit,
 generate `/etc/stream-auth.key`, install the nginx vhost. See `docs/kodi-stream.md` for the full runbook.
 
 ## Related
