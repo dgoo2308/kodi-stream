@@ -229,3 +229,15 @@ VPS service `stream-auth` (`vps/stream-auth.py`, venv `/opt/stream-auth/venv` = 
   (only the token hash is stored), so revoke is immediate.
 - Safety: JSON API requires `Content-Type: application/json` + same Origin (CSRF); password login rate
   limited (10 failures / 15 min / IP); open-redirect guard on `next`.
+
+## TV remote navigation (2026-10-31, LG hotel TV: webOS/NetCast browser, Chrome 87)
+- Native `<select>` lists close within seconds on LG and cannot be scrolled with a remote: every select
+  (detail sheet audio/subtitles/quality/encoder, header sort/genre) is a button opening our own picker
+  (`#pmenu`: centred dialog, or bottom-right inside the player so it works in fullscreen). The hidden
+  `<select>` still holds the value.
+- Arrow keys: spatial focus inside the topmost layer (picker > player bar > detail sheet > page). Thumbnails:
+  left/right = previous/next title in reading order (wraps rows), up/down = the title above/below; OK opens,
+  Back (461 / Esc) closes the picker / detail sheet / episode list. Focus returns to the card after Close / Stop.
+- Colour buttons (403-406): red/green/yellow = subtitles/audio/quality (player + detail), blue = stop (player)
+  / play-resume (detail); library: Movies / Shows / Search / Downloads. TVs show a coloured dot on those
+  controls (UA sniff, `?tv=1` forces it).

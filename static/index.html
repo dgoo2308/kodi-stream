@@ -12,7 +12,7 @@
   header h1 { font-size:18px; margin:0 8px 0 0; }
   header input[type=search] { flex:0 1 220px; min-width:0; background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; padding:7px 10px; font-size:15px; }
   .filters { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
-  .filters select, .filters label { background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; padding:7px 8px; font-size:14px; max-width:170px; }
+  .filters select, .filters label, .filters .selbtn { background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; padding:7px 8px; font-size:14px; max-width:170px; }
   .filters label { display:flex; gap:5px; align-items:center; cursor:pointer; white-space:nowrap; }
   .filters.hide { display:none; }
   .tabs { margin-left:auto; display:flex; gap:6px; }
@@ -27,7 +27,7 @@
     .tabs { order:1; margin-left:0; }
     header input[type=search] { order:2; flex:1 1 0; }
     .filters { order:3; flex:1 1 100%; flex-wrap:nowrap; min-width:0; }
-    .filters select { flex:1 1 0; min-width:0; max-width:none; }
+    .filters select, .filters .selbtn { flex:1 1 0; min-width:0; max-width:none; font-size:14px; padding:7px 8px; }
     .filters label { flex:none; padding:7px 6px; }
   }
   main { padding:12px; }
@@ -48,13 +48,26 @@
   #player.hidebar { cursor:none; }
   #pbar button, #pbar select { background:#222; color:var(--fg); border:1px solid #444; border-radius:8px; padding:6px 10px; }
   #pbar .pick { max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  /* TV remotes move focus around: make it a clear blue ring instead of the browser's default */
-  #player :focus { outline:3px solid var(--acc); outline-offset:2px; }
+  /* TV remotes move focus around: a clear blue ring instead of the browser's default (red on LG) */
+  :focus { outline:none; }
+  :focus-visible { outline:3px solid var(--acc); outline-offset:2px; }
+  .card:focus-visible { outline:3px solid var(--acc); outline-offset:3px; transform:scale(1.04); z-index:1; }
+  .card { scroll-margin:120px 0 24px; transition:transform .12s ease; }
+  /* native <select>s are replaced by buttons that open the picker (#pmenu) */
+  select.enh { display:none !important; }
+  .selbtn { background:#222; color:var(--fg); border:1px solid #444; border-radius:8px; padding:8px 12px; font-size:15px;
+            max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; cursor:pointer; }
+  .selbtn::after { content:' ▾'; color:var(--mut); }
+  /* on TVs: a coloured dot on the controls the remote's colour buttons trigger */
+  html.tv .ck::before { content:''; display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:middle; background:var(--ck); }
+  .ck-r { --ck:#e53935; } .ck-g { --ck:#43a047; } .ck-y { --ck:#fdd835; } .ck-b { --ck:#1e88e5; }
   /* in-player picker (audio / subtitles / quality): big buttons, works with a TV remote's arrows + OK */
   #pmenu { position:absolute; right:14px; bottom:84px; z-index:3; display:none; flex-direction:column; gap:6px;
            min-width:240px; max-width:min(420px, 92vw); max-height:60vh; overflow:auto; padding:12px;
            background:#141414f2; border:1px solid #333; border-radius:12px; }
   #pmenu.on { display:flex; }
+  #pmenu.modal { position:fixed; left:50%; top:50%; right:auto; bottom:auto; transform:translate(-50%,-50%); z-index:40;
+                 max-height:70vh; box-shadow:0 0 0 100vmax #0009; }
   #pmenu .ttl { color:var(--mut); font-size:13px; padding:0 4px 4px; }
   #pmenu button { text-align:left; font-size:17px; padding:11px 14px; background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; }
   #pmenu button.cur { border-color:var(--acc); color:var(--acc); }
@@ -104,7 +117,7 @@
   <div class="info" id="dInfo">…</div>
   <div class="row">
     <label>Audio <select id="dAudio"></select></label>
-    <label>Subtitles <select id="dSub"><option value="">none</option></select></label>
+    <label>Subtitles <select id="dSub"><option value="">Off</option></select></label>
     <label>Quality <select id="dQ"><option value="720p">720p</option><option value="540p">540p</option><option value="360p">360p</option></select></label>
     <label>Encoder <select id="dEnc"><option value="x264">SW (x264)</option><option value="rkmpp">HW (rkmpp)</option></select></label>
   </div>
@@ -147,7 +160,7 @@ const api = (p, opt) => fetch('/api' + p, opt).then(r => r.json());
 const post = (p, body) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
 const fmt = s => { s = Math.max(0, Math.floor(s||0)); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return (h? h+':'+String(m).padStart(2,'0') : m) + ':' + String(x).padStart(2,'0'); };
 let tab = 'movie', showId = null, cur = null;
-{ const e = new URLSearchParams(location.search).get('enc'); if (e === 'x264' || e === 'rkmpp') setTimeout(() => { $('#dEnc').value = e; }, 0); }
+{ const e = new URLSearchParams(location.search).get('enc'); if (e === 'x264' || e === 'rkmpp') setTimeout(() => { $('#dEnc').value = e; syncSel(); }, 0); }
 
 // ---------------- catalogue
 function card(it) {
@@ -158,6 +171,7 @@ function card(it) {
     : (it.year || '') + ($('#fSort').value === 'rating' && it.rating ? ` · ★${it.rating}` : '');
   d.innerHTML = `<img loading="lazy" src="${it.poster || ''}" alt=""><div class="t">${it.title}<small>${sub}</small></div>` +
     (pct ? `<div class="bar" style="width:${pct}%"></div>` : '') + (it.playCount ? '<div class="seen">✓</div>' : '');
+  d.tabIndex = 0; d.dataset.key = it.type + it.id;
   d.onclick = () => it.type === 'show' ? openShow(it) : openItem(it);
   return d;
 }
@@ -180,6 +194,7 @@ async function restorePrefs() {
     genreCache[kind].map(g => `<option value="${g.name.replace(/"/g, '&quot;')}">${g.name} (${g.count})</option>`).join('');
   $('#fGenre').value = p.genre || '';
   if ($('#fGenre').value !== (p.genre || '')) $('#fGenre').value = '';
+  syncSel();
 }
 async function nextPage() {
   if (paging.done || paging.busy) return;
@@ -211,7 +226,13 @@ async function load(keep) {
   if (keep) scrollTo(0, y);
 }
 new IntersectionObserver(es => { if (es[0].isIntersecting) nextPage(); }, { rootMargin: '600px' }).observe($('#more'));
-function openShow(s) { showId = s.id; scrollTo(0, 0); $('#crumb').style.display = 'block'; $('#crumb').innerHTML = `<a href="#" id="back">◀ Shows</a> / ${s.title}`; $('#back').onclick = e => { e.preventDefault(); showId = null; load(); }; load(); }
+const focusCard = key => { const c = key ? document.querySelector(`.card[data-key="${key}"]`) : document.querySelector('#grid .card'); if (c) focusEl(c); };
+function openShow(s) {
+  showId = s.id; scrollTo(0, 0); $('#crumb').style.display = 'block'; $('#crumb').innerHTML = `<a href="#" id="back">◀ Shows</a> / ${esc(s.title)}`;
+  // back to the show list: land on the show you came from
+  $('#back').onclick = e => { e.preventDefault(); showId = null; load().then(() => focusCard('show' + s.id)); };
+  load().then(() => focusCard());
+}
 $('#q').oninput = () => { clearTimeout(window._t); window._t = setTimeout(() => load(), 300); };
 for (const el of ['#fSort', '#fGenre', '#fUnw']) $(el).onchange = () => { savePrefs(); scrollTo(0, 0); load(); };
 async function setTab(t) {
@@ -278,10 +299,13 @@ let quality = '720p';
 try { quality = localStorage.getItem('ks.quality') || quality; } catch (e) {}
 $('#dQ').value = quality; if (!$('#dQ').value) $('#dQ').value = '720p';
 $('#dQ').onchange = () => { quality = $('#dQ').value; try { localStorage.setItem('ks.quality', quality); } catch (e) {} };
+let lastCard = null;
 async function openItem(it) {
+  lastCard = document.activeElement && document.activeElement.classList.contains('card') ? document.activeElement : null;
   cur = { type: it.type, id: it.id, title: it.type === 'episode' ? `${it.show} S${it.season}E${it.episode} · ${it.title}` : it.title };
   $('#dTitle').textContent = cur.title; $('#dInfo').textContent = 'Probing…'; $('#detail').classList.add('on');
-  $('#dDlMsg').textContent = ''; $('#dOrig').style.display = 'none';
+  $('#dDlMsg').textContent = ''; $('#dOrig').style.display = 'none'; $('#dResume').style.display = 'none';
+  $('#dPlay').focus({ preventScroll: true });
   const d = await api(`/item/${it.type}/${it.id}`);
   cur.meta = d;
   if (!d.available) { $('#dInfo').textContent = 'File not available (LaCie unplugged?)'; return; }
@@ -291,7 +315,7 @@ async function openItem(it) {
   d.probe.audio.forEach(s => { const o = document.createElement('option'); o.value = s.index;
     o.textContent = trackName(s) + ` · ${s.codec || '?'}${s.channels ? ' ' + s.channels + 'ch' : ''}`; a.appendChild(o); });
   const eng = d.probe.audio.find(s => s.lang === 'eng'); if (eng) a.value = eng.index;
-  const sb = $('#dSub'); sb.innerHTML = '<option value="">none</option>';
+  const sb = $('#dSub'); sb.innerHTML = '<option value="">Off</option>';
   // long lists (30+ tracks are common): readable names, languages picked before on top, then A-Z
   const pref = subPrefs(), rank = s => { const i = pref.indexOf((s.lang || '').toLowerCase()); return i < 0 ? 99 : i; };
   d.probe.subs.filter(s => s.text).map(s => ({ s, name: trackName(s, s.path ? ' · file' : '') }))
@@ -302,8 +326,14 @@ async function openItem(it) {
   $('#dResume').textContent = `Resume ${fmt(d.resume)}`;
   $('#dOrig').href = `/api/download/original/${it.type}/${it.id}`;
   $('#dOrig').textContent = `⬇ Original (${gb(d.size || 0)})`; $('#dOrig').style.display = '';
+  syncSel();
+  if (d.resume > 0 && document.activeElement === $('#dPlay')) $('#dResume').focus({ preventScroll: true });
 }
-$('#dClose').onclick = () => $('#detail').classList.remove('on');
+function closeDetail() {
+  $('#detail').classList.remove('on');
+  if (lastCard && document.contains(lastCard)) focusEl(lastCard);
+}
+$('#dClose').onclick = closeDetail;
 $('#dPlay').onclick = () => startPlay(0);
 $('#dResume').onclick = () => startPlay(cur.meta.resume);
 $('#dPrep').onclick = async () => {
@@ -325,6 +355,7 @@ function playBody(at) {
 }
 async function startPlay(at) {
   $('#detail').classList.remove('on'); $('#player').classList.add('on'); $('#ptitle').textContent = cur.title; $('#msg').textContent = 'Starting…';
+  $('#bPlay').focus({ preventScroll: true });
   const res = await post('/play', playBody(at));
   if (res.error) { $('#msg').textContent = res.error; return; }
   mode = res.mode; duration = res.duration || cur.meta.probe.duration; offset = res.offset || 0; sess = res;
@@ -408,12 +439,14 @@ $('#bFull').onclick = () => { const el = $('#player'); (el.requestFullscreen || 
 $('#bStop').onclick = stopPlay;
 async function stopPlay() {
   saveProgress(); clearInterval(ticker); if (hls) { hls.destroy(); hls = null; } video.pause(); video.removeAttribute('src'); video.load();
-  sess = null; $('#player').classList.remove('on'); await post('/stop', {}); load(!showId);
+  sess = null; $('#player').classList.remove('on'); await post('/stop', {});
+  const key = cur.type + cur.id; await load(!showId); focusCard(key);
 }
 
 // auto-hide the control bar during playback; show on mouse move / tap / remote key / pause.
 // Never hide while a picker menu is open (a TV remote sends keys, not mouse moves).
 let barTimer;
+const playerOn = () => $('#player').classList.contains('on');
 const menuOpen = () => $('#pmenu').classList.contains('on');
 function showBar() {
   const pl = $('#player'); pl.classList.remove('hidebar');
@@ -426,8 +459,77 @@ $('#player').addEventListener('click', showBar);
 video.addEventListener('pause', () => { clearTimeout(barTimer); $('#player').classList.remove('hidebar'); });
 video.addEventListener('play', showBar);
 
-// in-player audio / subtitle / quality pickers: our own menu instead of <select> (TV browsers drop
-// native dropdowns); options mirror the detail sheet, a change restarts at the current position
+// ---------------- picker: our own list instead of native <select> dropdowns (TV browsers close
+// those within seconds and can't scroll them with a remote). Big buttons, arrows + OK, Back closes.
+// Inside the player it sits bottom-right (and works in fullscreen); elsewhere it is a centred dialog.
+let pick = null;   // { sel, from }
+function openPicker(sel, title, from, onPick) {
+  const m = $('#pmenu'), inPlayer = playerOn();
+  (inPlayer ? $('#player') : document.body).appendChild(m);
+  m.classList.toggle('modal', !inPlayer);
+  pick = { sel, from };
+  const n = [...sel.options].filter(o => o.value !== '').length;
+  m.innerHTML = `<div class="ttl">${esc(title)}${n > 8 ? ` (${n})` : ''}</div>`;
+  for (const o of sel.options) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = o.textContent.trim();
+    if (o.value === sel.value) b.className = 'cur';
+    b.onclick = e => {
+      e.stopPropagation(); closePicker();
+      if (o.value === sel.value) return;
+      sel.value = o.value; onPick(o.value);
+    };
+    m.appendChild(b);
+  }
+  m.classList.add('on'); if (inPlayer) showBar();
+  const c = m.querySelector('button.cur') || m.querySelector('button');
+  c.focus(); c.scrollIntoView({ block: 'nearest' });
+}
+function closePicker() {
+  $('#pmenu').classList.remove('on');
+  if (pick && pick.from) pick.from.focus();
+  pick = null; if (playerOn()) showBar();
+}
+// a click outside an open picker closes it (and does nothing else)
+document.addEventListener('click', e => {
+  if (!menuOpen() || $('#pmenu').contains(e.target) || (pick && pick.from && pick.from.contains(e.target))) return;
+  e.preventDefault(); e.stopPropagation(); closePicker();
+}, true);
+
+// every <select> on the page becomes a button that opens the picker; the hidden <select> keeps the
+// value, so filters / play / downloads read it exactly as before
+const SEL_TITLES = { dAudio: 'Audio', dSub: 'Subtitles', dQ: 'Quality', dEnc: 'Encoder', fSort: 'Sort', fGenre: 'Genre' };
+function syncSel() {
+  for (const id of Object.keys(SEL_TITLES)) {
+    const s = $('#' + id), o = s.options[s.selectedIndex];
+    s._btn.textContent = o ? o.textContent.trim() : '—';
+  }
+}
+for (const [id, title] of Object.entries(SEL_TITLES)) {
+  const s = $('#' + id), b = document.createElement('button');
+  b.type = 'button'; b.className = 'selbtn'; b.title = title;
+  s.classList.add('enh'); s._btn = b; s.before(b);   // before: a click on the <label> text opens it too
+  b.onclick = e => {
+    e.preventDefault(); e.stopPropagation();
+    if (menuOpen() && pick && pick.sel === s) return closePicker();
+    openPicker(s, title, b, () => { s.dispatchEvent(new Event('change')); syncSel(); });
+  };
+  new MutationObserver(syncSel).observe(s, { childList: true });
+}
+syncSel();
+
+// TV browsers: show which control each colour button triggers (?tv=1 forces it for testing)
+if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.test(navigator.userAgent) ||
+    new URLSearchParams(location.search).has('tv')) {
+  document.documentElement.classList.add('tv');
+  const marks = { r: ['#pSub', '#tabM'], g: ['#pAudio', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dPlay', '#dResume', '#tabD'] };
+  for (const [c, ids] of Object.entries(marks)) ids.forEach(id => $(id).classList.add('ck', 'ck-' + c));
+  [['dSub', 'r'], ['dAudio', 'g'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
+  $('#q').placeholder = 'Search… (yellow)';
+}
+
+// in-player audio / subtitle / quality buttons: same picker on the detail sheet's selects, a change
+// restarts the stream at the current position
 const PICKS = { '#pAudio': ['#dAudio', 'Audio'], '#pSub': ['#dSub', 'Subtitles'], '#pQ': ['#dQ', 'Quality'] };
 function syncPlayerSubs() {
   for (const [pid, [did, name]] of Object.entries(PICKS)) {
@@ -436,61 +538,129 @@ function syncPlayerSubs() {
     p.style.display = d.options.length > 1 ? '' : 'none';
   }
 }
-let menuFrom = null;
-function openMenu(pid) {
-  const [did, name] = PICKS[pid], d = $(did), m = $('#pmenu');
-  menuFrom = pid;
-  m.innerHTML = `<div class="ttl">${name}${d.options.length > 8 ? ` (${d.options.length - (name === 'Subtitles' ? 1 : 0)})` : ''}</div>`;
-  for (const o of d.options) {
-    const b = document.createElement('button');
-    b.textContent = (o.value === '' && name === 'Subtitles') ? 'Off' : o.textContent.trim();
-    if (o.value === d.value) b.className = 'cur';
-    b.onclick = e => {
-      e.stopPropagation(); closeMenu();
-      if (o.value === d.value) return;
-      d.value = o.value; if (did === '#dQ') d.onchange();
-      syncPlayerSubs(); seekTo(absPos(), true);
-    };
-    m.appendChild(b);
-  }
-  m.classList.add('on'); showBar();
-  (m.querySelector('button.cur') || m.querySelector('button')).focus();
-}
-function closeMenu() {
-  $('#pmenu').classList.remove('on');
-  if (menuFrom) $(menuFrom).focus();
-  menuFrom = null; showBar();
-}
-for (const pid of Object.keys(PICKS)) $(pid).onclick = e => { e.stopPropagation(); menuOpen() && menuFrom === pid ? closeMenu() : openMenu(pid); };
+for (const [pid, [did, name]] of Object.entries(PICKS)) $(pid).onclick = e => {
+  e.stopPropagation();
+  if (menuOpen() && pick && pick.from === $(pid)) return closePicker();
+  openPicker($(did), name, $(pid), () => {
+    if (did === '#dQ') $('#dQ').onchange();
+    syncSel(); syncPlayerSubs(); seekTo(absPos(), true);
+  });
+};
 $('#pmenu').addEventListener('click', e => e.stopPropagation());
 
-// TV remote / keyboard: any key brings the bar back (and is swallowed while the bar was hidden, so
-// OK on a hidden button does nothing); arrows move inside an open menu; Back/Esc closes it;
-// media keys play/pause/seek.
+// ---------------- TV remote / keyboard navigation
+// Arrows move focus to the nearest control in that direction (thumbnails: left/right = previous /
+// next title, wrapping rows; up/down = the title above / below), OK opens, Back closes the topmost
+// layer. Focus stays inside the topmost layer: picker > player bar > detail sheet > page.
 const K = { BACK: [27, 8, 461, 10009], PLAY: [415], PAUSE: [19], PLAYPAUSE: [179, 10252], FF: [417, 228], REW: [412, 227] };
+const DIRS = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
+const detailOn = () => $('#detail').classList.contains('on');
+function navScope() {
+  if (menuOpen()) return $('#pmenu');
+  if (playerOn()) return $('#pbar');
+  if (detailOn()) return $('#detail');
+  return document.body;
+}
+function focusables(scope) {
+  return [...scope.querySelectorAll('button, a[href], input, .card')].filter(el => {
+    if (el.disabled || (scope === document.body && el.closest('#detail, #player, #pmenu'))) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  });
+}
+function focusEl(el) {
+  if (!el) return;
+  el.focus({ preventScroll: true });
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+function firstInView(els) {
+  return els.find(el => { const r = el.getBoundingClientRect(); return el.classList.contains('card') && r.top >= 0 && r.bottom <= innerHeight; })
+    || els[0];
+}
+function moveFocus(dir) {
+  const els = focusables(navScope()), cur = document.activeElement;
+  if (!els.includes(cur)) return focusEl(firstInView(els));
+  if (cur.classList.contains('card') && (dir === 'left' || dir === 'right')) {   // reading order through the grid
+    const cards = els.filter(el => el.classList.contains('card')), i = cards.indexOf(cur);
+    const next = cards[i + (dir === 'right' ? 1 : -1)];
+    if (next) return focusEl(next);
+    if (dir === 'right') return;
+  }
+  const a = cur.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+  let best = null, bestScore = Infinity;
+  for (const el of els) {
+    if (el === cur) continue;
+    const b = el.getBoundingClientRect(), dx = b.left + b.width / 2 - ax, dy = b.top + b.height / 2 - ay;
+    const horiz = dir === 'right' || dir === 'left';
+    const main = dir === 'right' ? dx : dir === 'left' ? -dx : dir === 'down' ? dy : -dy;
+    const cross = horiz ? Math.abs(dy) : Math.abs(dx);
+    if (main <= 4) continue;
+    // same row (left/right) or same column (up/down) always wins; anything else must lie within
+    // 45° of the direction and comes after
+    const inLine = horiz ? b.top < a.bottom && b.bottom > a.top : b.left < a.right && b.right > a.left;
+    // then anything within 45° of the direction, and as a last resort the nearest one that way at all
+    const score = inLine ? main + cross * 0.3 : cross <= main ? 10000 + main + cross * 2 : 20000 + main + cross * 2;
+    if (score < bestScore) { bestScore = score; best = el; }
+  }
+  focusEl(best);
+}
+function goBack() {
+  if (menuOpen()) { closePicker(); return true; }
+  if (playerOn()) return false;   // Back in the player: leave it to Stop, don't kill a stream by accident
+  if (detailOn()) { closeDetail(); return true; }
+  if (showId) { $('#back').click(); return true; }
+  return false;
+}
 document.addEventListener('keydown', e => {
-  if (!$('#player').classList.contains('on')) return;
-  const k = e.keyCode;
-  if (K.PLAY.includes(k)) { video.play(); return e.preventDefault(); }
-  if (K.PAUSE.includes(k)) { video.pause(); saveProgress(); return e.preventDefault(); }
-  if (K.PLAYPAUSE.includes(k)) { $('#bPlay').onclick(); return e.preventDefault(); }
-  if (K.FF.includes(k)) { seekTo(absPos() + 30); showBar(); return e.preventDefault(); }
-  if (K.REW.includes(k)) { seekTo(absPos() - 15); showBar(); return e.preventDefault(); }
+  const k = e.keyCode, dir = DIRS[k], ae = document.activeElement;
+  // the picker owns the keys while open: up/down wrap, page / channel up-down jump 8 rows
   if (menuOpen()) {
-    const bs = [...$('#pmenu').querySelectorAll('button')], i = bs.indexOf(document.activeElement);
-    if (K.BACK.includes(k)) { closeMenu(); return e.preventDefault(); }
-    // up/down wrap around; page / channel up-down jump 8 rows (long subtitle lists)
+    if (K.BACK.includes(k)) { closePicker(); return e.preventDefault(); }
+    const bs = [...$('#pmenu').querySelectorAll('button')], i = bs.indexOf(ae);
     const step = k === 40 ? 1 : k === 38 ? -1 : k === 34 ? 8 : k === 33 ? -8 : 0;
     if (step) {
       let j = i < 0 ? 0 : i + step;
       j = Math.abs(step) === 1 ? (j + bs.length) % bs.length : Math.max(0, Math.min(bs.length - 1, j));
-      bs[j].focus(); showBar(); return e.preventDefault();
-    }
-    showBar(); return;
+      focusEl(bs[j]); e.preventDefault();
+    } else if (dir) e.preventDefault();
+    if (playerOn()) showBar();
+    return;
   }
-  const hidden = $('#player').classList.contains('hidebar');
-  showBar();
-  if (hidden) { e.preventDefault(); e.stopPropagation(); if (!$('#pbar').contains(document.activeElement)) $('#bPlay').focus(); }
+  // colour buttons: red / green / yellow = subtitles / audio / quality in the player and the detail
+  // sheet, blue = stop (player) or play / resume (detail); in the library = Movies / Shows / Search / Downloads
+  const color = { 403: 0, 404: 1, 405: 2, 406: 3 }[k];
+  if (color !== undefined) {
+    e.preventDefault();
+    if (playerOn()) { showBar(); [$('#pSub'), $('#pAudio'), $('#pQ'), $('#bStop')][color].click(); }
+    else if (detailOn()) [$('#dSub')._btn, $('#dAudio')._btn, $('#dQ')._btn,
+                          $('#dResume').style.display !== 'none' ? $('#dResume') : $('#dPlay')][color].click();
+    else if (color === 2) focusEl($('#q'));
+    else [$('#tabM'), $('#tabS'), null, $('#tabD')][color].click();
+    return;
+  }
+  if (playerOn()) {
+    if (K.PLAY.includes(k)) { video.play(); return e.preventDefault(); }
+    if (K.PAUSE.includes(k)) { video.pause(); saveProgress(); return e.preventDefault(); }
+    if (K.PLAYPAUSE.includes(k)) { $('#bPlay').onclick(); return e.preventDefault(); }
+    if (K.FF.includes(k)) { seekTo(absPos() + 30); showBar(); return e.preventDefault(); }
+    if (K.REW.includes(k)) { seekTo(absPos() - 15); showBar(); return e.preventDefault(); }
+    const hidden = $('#player').classList.contains('hidebar');
+    showBar();
+    // the first key on a hidden bar only brings it back (so OK can't fire an invisible button)
+    if (hidden) { e.preventDefault(); e.stopPropagation(); if (!$('#pbar').contains(ae)) $('#bPlay').focus(); return; }
+    // on the seek slider left/right skip like the ±buttons instead of nudging by 0.1 %
+    if (ae === $('#seek') && (dir === 'left' || dir === 'right')) { seekTo(absPos() + (dir === 'right' ? 30 : -15)); return e.preventDefault(); }
+  }
+  if (K.BACK.includes(k) && !(k === 8 && ae && ae.tagName === 'INPUT')) { if (goBack()) e.preventDefault(); return; }
+  if (k === 13 && ae && ae.classList.contains('card')) { ae.click(); return e.preventDefault(); }
+  if (k === 13 && ae && ae.type === 'checkbox') { ae.click(); return e.preventDefault(); }
+  if (!dir) return;
+  // inside the search box left/right move the cursor, and leave the box once it is at the end / start
+  if (ae && ae.tagName === 'INPUT' && ae.type !== 'checkbox' && ae.type !== 'range' && (dir === 'left' || dir === 'right')) {
+    const atEdge = dir === 'right' ? ae.selectionStart >= ae.value.length : ae.selectionEnd <= 0;
+    if (!atEdge) return;
+  }
+  moveFocus(dir); e.preventDefault();
 }, true);
 video.onended = () => { saveProgress(); };
 window.addEventListener('pagehide', () => { if ($('#player').classList.contains('on')) saveProgress(true); });
