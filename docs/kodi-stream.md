@@ -238,6 +238,8 @@ VPS service `stream-auth` (`vps/stream-auth.py`, venv `/opt/stream-auth/venv` = 
 - Arrow keys: spatial focus inside the topmost layer (picker > player bar > detail sheet > page). Thumbnails:
   left/right = previous/next title in reading order (wraps rows), up/down = the title above/below; OK opens,
   Back (461 / Esc) closes the picker / detail sheet / episode list. Focus returns to the card after Close / Stop.
-- Colour buttons (403-406): red/green/yellow = subtitles/audio/quality (player + detail), blue = stop (player)
-  / play-resume (detail); library: Movies / Shows / Search / Downloads. TVs show a coloured dot on those
-  controls (UA sniff, `?tv=1` forces it).
+- Colour buttons (403-406): red/green/yellow = subtitles/audio/quality (player + detail), library: Movies /
+  Shows / Search. Blue (LG's "four squares" key) = back to the titles everywhere: stop the player, close the
+  picker / detail sheet, episodes -> shows, Downloads -> Movies, else top of the grid. The remote's Stop key
+  (413) stops too; focus lands on the title that played. TVs show a coloured dot on those controls (UA
+  sniff, `?tv=1` forces it).

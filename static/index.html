@@ -228,7 +228,7 @@ async function load(keep) {
 new IntersectionObserver(es => { if (es[0].isIntersecting) nextPage(); }, { rootMargin: '600px' }).observe($('#more'));
 const focusCard = key => { const c = key ? document.querySelector(`.card[data-key="${key}"]`) : document.querySelector('#grid .card'); if (c) focusEl(c); };
 function openShow(s) {
-  showId = s.id; scrollTo(0, 0); $('#crumb').style.display = 'block'; $('#crumb').innerHTML = `<a href="#" id="back">◀ Shows</a> / ${esc(s.title)}`;
+  showId = s.id; scrollTo(0, 0); $('#crumb').style.display = 'block'; $('#crumb').innerHTML = `<a href="#" id="back" class="ck ck-b">◀ Shows</a> / ${esc(s.title)}`;
   // back to the show list: land on the show you came from
   $('#back').onclick = e => { e.preventDefault(); showId = null; load().then(() => focusCard('show' + s.id)); };
   load().then(() => focusCard());
@@ -240,7 +240,7 @@ async function setTab(t) {
   $('#tabM').classList.toggle('on', t === 'movie'); $('#tabS').classList.toggle('on', t === 'show'); $('#tabD').classList.toggle('on', t === 'dl');
   $('#crumb').style.display = 'none';
   if (t === 'dl') { paging.gen++; paging.done = true; $('#filters').classList.add('hide'); scrollTo(0, 0); return loadDownloads(); }
-  await restorePrefs(); scrollTo(0, 0); load();
+  await restorePrefs(); scrollTo(0, 0); return load();
 }
 $('#tabM').onclick = () => setTab('movie');
 $('#tabS').onclick = () => setTab('show');
@@ -522,7 +522,7 @@ syncSel();
 if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.test(navigator.userAgent) ||
     new URLSearchParams(location.search).has('tv')) {
   document.documentElement.classList.add('tv');
-  const marks = { r: ['#pSub', '#tabM'], g: ['#pAudio', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dPlay', '#dResume', '#tabD'] };
+  const marks = { r: ['#pSub', '#tabM'], g: ['#pAudio', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dClose'] };
   for (const [c, ids] of Object.entries(marks)) ids.forEach(id => $(id).classList.add('ck', 'ck-' + c));
   [['dSub', 'r'], ['dAudio', 'g'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
@@ -552,7 +552,7 @@ $('#pmenu').addEventListener('click', e => e.stopPropagation());
 // Arrows move focus to the nearest control in that direction (thumbnails: left/right = previous /
 // next title, wrapping rows; up/down = the title above / below), OK opens, Back closes the topmost
 // layer. Focus stays inside the topmost layer: picker > player bar > detail sheet > page.
-const K = { BACK: [27, 8, 461, 10009], PLAY: [415], PAUSE: [19], PLAYPAUSE: [179, 10252], FF: [417, 228], REW: [412, 227] };
+const K = { BACK: [27, 8, 461, 10009], PLAY: [415], PAUSE: [19], STOP: [413, 178], PLAYPAUSE: [179, 10252], FF: [417, 228], REW: [412, 227] };
 const DIRS = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
 const detailOn = () => $('#detail').classList.contains('on');
 function navScope() {
@@ -615,7 +615,7 @@ document.addEventListener('keydown', e => {
   const k = e.keyCode, dir = DIRS[k], ae = document.activeElement;
   // the picker owns the keys while open: up/down wrap, page / channel up-down jump 8 rows
   if (menuOpen()) {
-    if (K.BACK.includes(k)) { closePicker(); return e.preventDefault(); }
+    if (K.BACK.includes(k) || k === 406) { closePicker(); return e.preventDefault(); }
     const bs = [...$('#pmenu').querySelectorAll('button')], i = bs.indexOf(ae);
     const step = k === 40 ? 1 : k === 38 ? -1 : k === 34 ? 8 : k === 33 ? -8 : 0;
     if (step) {
@@ -627,17 +627,28 @@ document.addEventListener('keydown', e => {
     return;
   }
   // colour buttons: red / green / yellow = subtitles / audio / quality in the player and the detail
-  // sheet, blue = stop (player) or play / resume (detail); in the library = Movies / Shows / Search / Downloads
+  // sheet; in the library Movies / Shows / Search. Blue (the "four squares" key) is always "back to
+  // the titles": stop the player, close the detail sheet, episodes -> shows, else top of the grid.
   const color = { 403: 0, 404: 1, 405: 2, 406: 3 }[k];
-  if (color !== undefined) {
+  if (color === 3) {
     e.preventDefault();
-    if (playerOn()) { showBar(); [$('#pSub'), $('#pAudio'), $('#pQ'), $('#bStop')][color].click(); }
-    else if (detailOn()) [$('#dSub')._btn, $('#dAudio')._btn, $('#dQ')._btn,
-                          $('#dResume').style.display !== 'none' ? $('#dResume') : $('#dPlay')][color].click();
-    else if (color === 2) focusEl($('#q'));
-    else [$('#tabM'), $('#tabS'), null, $('#tabD')][color].click();
+    if (playerOn()) stopPlay();
+    else if (detailOn()) closeDetail();
+    else if (showId) $('#back').click();
+    else if (tab === 'dl') setTab('movie').then(() => focusCard());
+    else { scrollTo(0, 0); focusCard(); }
     return;
   }
+  if (color !== undefined) {
+    e.preventDefault();
+    if (playerOn()) { showBar(); [$('#pSub'), $('#pAudio'), $('#pQ')][color].click(); }
+    else if (detailOn()) [$('#dSub')._btn, $('#dAudio')._btn, $('#dQ')._btn][color].click();
+    else if (color === 2) focusEl($('#q'));
+    else [$('#tabM'), $('#tabS')][color].click();
+    return;
+  }
+  // the remote's own Stop key: stop and go back to the titles (focus lands on the one that played)
+  if (playerOn() && K.STOP.includes(k)) { stopPlay(); return e.preventDefault(); }
   if (playerOn()) {
     if (K.PLAY.includes(k)) { video.play(); return e.preventDefault(); }
     if (K.PAUSE.includes(k)) { video.pause(); saveProgress(); return e.preventDefault(); }
