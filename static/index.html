@@ -256,8 +256,9 @@ async function setTab(t) {
   if (t === 'dl') { paging.gen++; paging.done = true; $('#filters').classList.add('hide'); scrollTo(0, 0); return loadDownloads(); }
   await restorePrefs(); scrollTo(0, 0); return load();
 }
-$('#tabM').onclick = () => setTab('movie');
-$('#tabS').onclick = () => setTab('show');
+const tvFocus = () => { if (document.documentElement.classList.contains('tv')) focusCard(); };
+$('#tabM').onclick = () => setTab('movie').then(tvFocus);
+$('#tabS').onclick = () => setTab('show').then(tvFocus);
 $('#tabD').onclick = () => setTab('dl');
 
 // ---------------- downloads (prepared MP4s live on the box; Save hands the file to the browser)
@@ -569,6 +570,13 @@ syncSel();
 if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.test(navigator.userAgent) ||
     new URLSearchParams(location.search).has('tv')) {
   document.documentElement.classList.add('tv');
+  // LG's browser only hands remote keys to the page while an element in it has focus (nothing focused =
+  // the TV keeps every key, even colours). So: the pointer focuses what it is over, and the grid always
+  // gets a focused thumbnail after it (re)loads.
+  document.addEventListener('mouseover', ev => {
+    const el = ev.target.closest && ev.target.closest('.card, button, a[href], input, .selbtn');
+    if (el && el !== document.activeElement && !el.closest('#player.hidebar')) el.focus({ preventScroll: true });
+  });
   const marks = { r: ['#pSub', '#tabM', '#tabS'], y: ['#pQ'] };
   for (const [c, ids] of Object.entries(marks)) ids.forEach(id => $(id).classList.add('ck', 'ck-' + c));
   [['dSub', 'r'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
@@ -583,7 +591,7 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
            focus: a ? (a.dataset && a.dataset.key) || a.id || a.tagName : '-', prevented: ev.defaultPrevented });
   }, false);   // bubble phase on window: runs after our handler, so 'prevented' shows whether we took it
   window.addEventListener('popstate', () => diag({ ev: 'popstate', layers: layers.join('>') }));
-  diag({ ev: 'loaded', v: 'tvnav-3' });
+  diag({ ev: 'loaded', v: 'tvnav-4' });
 }
 
 // in-player audio / subtitle / quality buttons: same picker on the detail sheet's selects, a change
@@ -704,8 +712,8 @@ document.addEventListener('keydown', e => {
     if (playerOn()) { showBar(); [$('#pSub'), $('#pAudio'), $('#pQ')][i].click(); }
     else if (detailOn()) [$('#dSub')._btn, $('#dAudio')._btn, $('#dQ')._btn][i].click();
     else if (color === 'y') focusEl($('#q'));
-    else if (color === 'g') setTab('show');
-    else setTab(tab === 'movie' ? 'show' : 'movie');
+    else if (color === 'g') setTab('show').then(() => focusCard());
+    else setTab(tab === 'movie' ? 'show' : 'movie').then(() => focusCard());
     return;
   }
   // the remote's own Stop key: stop and go back to the titles (focus lands on the one that played)
@@ -738,7 +746,7 @@ video.onended = () => { saveProgress(); };
 window.addEventListener('pagehide', () => { if ($('#player').classList.contains('on')) saveProgress(true); });
 // device list / phone sign-in only exist behind the VPS login, not on the LAN site
 if (/(^|\.)nellika\.io$/.test(location.hostname)) $('#acct').style.display = '';
-setTab('movie');
+setTab('movie').then(() => { if (document.documentElement.classList.contains('tv')) focusCard(); });
 </script>
 </body>
 </html>
