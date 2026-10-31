@@ -69,6 +69,7 @@
            border-radius:10px; font-size:17px; z-index:60; opacity:0; transition:opacity .2s; pointer-events:none; }
   #toast.on { opacity:1; }
   html.tv.wheelnav .card:hover:not(:focus) { outline:none; transform:none; }
+  html.tv.wheelnav, html.tv.wheelnav * { cursor:none !important; }   /* selecting with keys: hide the hand */
   html.tv.wheelnav .card:focus { outline:3px solid var(--acc); outline-offset:3px; transform:scale(1.04); z-index:1; }
   #tvtip { background:#1d2a38; color:#cfe3ff; font-size:15px; padding:8px 14px; }
   .ck-r { --ck:#e53935; } .ck-g { --ck:#43a047; } .ck-y { --ck:#fdd835; } .ck-b { --ck:#1e88e5; }
@@ -612,13 +613,20 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
   // one notch = next / previous thumbnail (or picker row), and OK opens what the wheel selected, wherever
   // the hand is. Moving the hand switches back to plain pointer mode.
   const root = document.documentElement;
-  let wheelMode = false, wheelAcc = 0, wheelAt = 0, mx = -1, my = -1;
-  const setWheelMode = on => { wheelMode = on; root.classList.toggle('wheelnav', on); };
+  let wheelMode = false, wheelAcc = 0, wheelAt = 0, mx = -1, my = -1, ax = -1, ay = -1;
+  // selection mode starts where the hand is (ax, ay); a Magic Remote hand always trembles a little, so only
+  // a real move (> 80 px away) goes back to pointer mode, otherwise OK would hit whatever is under the hand
+  const setWheelMode = on => { if (on && !wheelMode) { ax = mx; ay = my; } wheelMode = on; root.classList.toggle('wheelnav', on); };
   window.ksSelectMode = () => { setWheelMode(true); wheelAt = Date.now(); };
   document.addEventListener('mousemove', ev => {
-    if (Math.abs(ev.clientX - mx) + Math.abs(ev.clientY - my) > 6 && Date.now() - wheelAt > 400) setWheelMode(false);
     mx = ev.clientX; my = ev.clientY;
+    if (!wheelMode) return;
+    if (ax < 0) { ax = mx; ay = my; return; }   // first position seen in this mode
+    if (Math.abs(mx - ax) + Math.abs(my - ay) > 80 && Date.now() - wheelAt > 400) setWheelMode(false);
   });
+  // OK arrives as mousedown + click at the hand: the mousedown alone would move focus to the card under the
+  // hand before our click redirect runs, so in selection mode it must not change focus
+  document.addEventListener('mousedown', ev => { if (wheelMode) ev.preventDefault(); }, true);
   document.addEventListener('mouseover', ev => {
     if (wheelMode) return;   // content scrolling under a still hand must not steal the wheel selection
     const el = ev.target.closest && ev.target.closest('.card, button, a[href], input, .selbtn');
@@ -858,7 +866,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-13';
+const BUILD = 'tvnav-14';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
