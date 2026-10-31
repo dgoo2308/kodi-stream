@@ -670,14 +670,14 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
   const toastEl = document.createElement('div'); toastEl.id = 'toast'; document.body.appendChild(toastEl);
   let toastTimer;
   function toast(t) { toastEl.textContent = t; toastEl.classList.add('on'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('on'), 2800); }
-  const marks = { r: ['#pSub', '#tabM', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dClose'] };
+  const marks = { r: ['#pSub', '#tabM'], g: ['#pAudio', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dClose'] };
   for (const [c, ids] of Object.entries(marks)) ids.forEach(id => $(id).classList.add('ck', 'ck-' + c));
-  [['dSub', 'r'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
+  [['dSub', 'r'], ['dAudio', 'g'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
   // the TV keeps keyboard focus in its own address bar until the first click into the page: say so
   const tip = $('#tvtip');
-  tip.innerHTML = 'Click once on the page to start. <b>Scroll wheel</b>: flip through titles, <b>OK</b> opens · ' +
-    '<b style="color:#ff6b6b">●</b> Movies ⇄ Shows · <b style="color:#fdd835">●</b> search · <b>Back</b> closes';
+  tip.innerHTML = 'Click once on the page to start. ⏪ ⏩ (or the scroll wheel) select a title, <b>OK</b> / ▶ opens · <b style="color:#ff6b6b">●</b> Movies · <b style="color:#66bb6a">●</b> Shows · ' +
+    '<b style="color:#fdd835">●</b> search · <b>Back</b> closes';
   const hideTip = () => { tip.style.display = 'none'; };
   tip.style.display = '';
   document.addEventListener('click', hideTip, { once: true, capture: true });
@@ -797,9 +797,9 @@ document.addEventListener('keydown', e => {
   }
   // colour buttons. The LG hotel TV only hands red (403) and yellow (405) to web pages (green / blue /
   // arrows stay with the TV), so those two carry the important jobs:
-  //   red    = subtitles (player, detail)  · library: Movies <-> Shows
+  //   red    = subtitles (player, detail)  · library: Movies
   //   yellow = quality   (player, detail)  · library: search
-  //   green  = audio (player, detail) · library: Shows      (other TVs)
+  //   green  = audio     (player, detail)  · library: Shows
   //   blue / 416 = back to the titles
   const color = { 403: 'r', 404: 'g', 405: 'y', 406: 'b', 416: 'b' }[k];
   if (color === 'b') { e.preventDefault(); backToTitles(); return; }
@@ -810,7 +810,7 @@ document.addEventListener('keydown', e => {
     else if (detailOn()) [$('#dSub')._btn, $('#dAudio')._btn, $('#dQ')._btn][i].click();
     else if (color === 'y') focusEl($('#q'));
     else if (color === 'g') setTab('show').then(() => focusCard());
-    else setTab(tab === 'movie' ? 'show' : 'movie').then(() => focusCard());
+    else setTab('movie').then(() => focusCard());
     return;
   }
   // outside the player the media keys browse: ⏩ / ⏪ = next / previous title (or control on the detail
@@ -866,7 +866,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-14';
+const BUILD = 'tvnav-15';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
