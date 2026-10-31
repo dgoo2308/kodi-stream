@@ -641,9 +641,7 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
     const el = ev.target.closest && ev.target.closest('.card, button, a[href], input, .selbtn');
     if (el && el !== document.activeElement && !el.closest('#player.hidebar')) el.focus({ preventScroll: true });
   });
-  let wheelLogged = false;
   document.addEventListener('wheel', ev => {
-    if (!wheelLogged) { wheelLogged = true; try { new Image().src = '/api/_diag?ev=wheel&dy=' + Math.round(ev.deltaY) + '&mode=' + ev.deltaMode; } catch (e) {} }
     if (playerOn() && !menuOpen()) return;
     const list = menuOpen() ? [...$('#pmenu').querySelectorAll('button')]
       : detailOn() ? null : [...document.querySelectorAll('#grid .card')];
@@ -685,14 +683,13 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
   [['dSub', 'r'], ['dAudio', 'g'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
   // the TV keeps keyboard focus in its own address bar until the first click into the page: say so
-  const tvlogEarly = o => { try { new Image().src = '/api/_diag?' + new URLSearchParams(Object.assign({ t: Date.now() }, o)); } catch (e) {} };
   // this TV fires one OK press as two clicks (seen: the start layer closed AND the first title opened in
   // the same second; an extra click right after Resume toggled pause): drop a repeat within 450 ms
   let lastOK = 0;
   window.addEventListener('click', ev => {
     if (!ev.isTrusted) return;
     const t = Date.now();
-    if (t - lastOK < 450) { ev.preventDefault(); ev.stopImmediatePropagation(); tvlogEarly({ ev: 'dup-click' }); return; }
+    if (t - lastOK < 450) { ev.preventDefault(); ev.stopImmediatePropagation(); return; }
     lastOK = t;
   }, true);
   const start = $('#tvstart');
@@ -702,18 +699,7 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
     start.style.display = 'none';
     focusCard();
     if (window.ksSelectMode) ksSelectMode();
-    tvlog({ ev: 'start-click' });
   });
-  // TEMP: what reaches the page while the player is on (red/yellow pause instead of opening the lists)
-  const tvlog = o => { try { new Image().src = '/api/_diag?' + new URLSearchParams(Object.assign({ t: Date.now() }, o)); } catch (e) {} };
-  window.tvlog = tvlog;
-  const where = el => el ? (el.id || (el.dataset && el.dataset.key) || el.tagName) : '-';
-  window.addEventListener('keydown', ev => { if (playerOn()) tvlog({ ev: 'pkey', kc: ev.keyCode, focus: where(document.activeElement), prevented: ev.defaultPrevented }); });
-  document.addEventListener('click', ev => { if (playerOn()) tvlog({ ev: 'pclick', target: where(ev.target), focus: where(document.activeElement) }); }, true);
-  window.addEventListener('blur', () => { if (playerOn()) tvlog({ ev: 'pblur' }); });
-  window.addEventListener('focus', () => { if (playerOn()) tvlog({ ev: 'pfocus' }); });
-  video.addEventListener('pause', () => tvlog({ ev: 'vpause', focus: where(document.activeElement) }));
-  video.addEventListener('play', () => tvlog({ ev: 'vplay', focus: where(document.activeElement) }));
   const tip = $('#tvtip');
   tip.innerHTML = 'Click once on the page to start. ⏪ ⏩ (or the scroll wheel) select a title, <b>OK</b> / ▶ opens · <b style="color:#ff6b6b">●</b> Movies · <b style="color:#66bb6a">●</b> Shows · ' +
     '<b style="color:#fdd835">●</b> search · <b>Back</b> closes';
@@ -859,7 +845,6 @@ document.addEventListener('keydown', e => {
   // sheet), ▶ = open what is highlighted. On pointer TVs OK then also opens the highlighted title.
   if (!playerOn() && (K.FF.includes(k) || K.REW.includes(k) || K.PLAY.includes(k) || K.PLAYPAUSE.includes(k))) {
     e.preventDefault();
-    if (!window.__mediaLogged) { window.__mediaLogged = true; try { new Image().src = '/api/_diag?ev=media&kc=' + k; } catch (x) {} }
     if (K.PLAY.includes(k) || K.PLAYPAUSE.includes(k)) {
       // on a title's screen ▶ means "watch it": resume / from start as a small menu, or just start
       if (detailOn() && cur && cur.meta && cur.meta.available) return playMenu();
@@ -908,7 +893,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-20';
+const BUILD = 'tvnav-21';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {

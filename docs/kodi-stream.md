@@ -258,6 +258,18 @@ UA `Mozilla/5.0 (Linux; NetCast; U) ... Chrome/87.0.3945.79 ... SmartTV/10.0 Col
   again to leave" so one Back no longer drops you into the TV browser.
 - **Scroll wheel = browsing**: the Magic Remote wheel does reach the page. One notch = next / previous
   thumbnail (or picker row) with the page following; OK then opens / picks the wheel selection wherever
-  the hand is (click redirect). Moving the hand returns to plain pointer mode. A one-off
-  `/api/_diag?ev=wheel` line in the access log shows the first wheel event (confirms delivery).
+  the hand is (click redirect). Moving the cursor > 80 px returns to plain pointer mode.
 - TV pages reload themselves when a new `BUILD` is deployed (they otherwise run a cached copy for hours).
+
+### Final TV behaviour (confirmed on the LG hotel TV, 2026-10-31)
+- The remote's arrows drive the browser's cursor (no events reach the page). Everything else arrives
+  once the page has focus: a full-screen "Press OK to start" layer takes the first OK.
+- **Key mode**: any remote key (colours, ⏪/⏩, ▶, Back) switches to key mode; OK (which is really a
+  click at the cursor) then presses the highlighted control instead of what is under the cursor; a
+  cursor move > 80 px returns to cursor mode. Only trusted clicks are redirected (the page's own
+  `el.click()` calls must reach their target, or red/yellow in the player would press ⏸).
+- The TV fires each OK as **two clicks**: a repeat trusted click within 450 ms is dropped.
+- ⏪/⏩ (or the wheel) select titles / list rows / detail buttons; ▶ or OK opens. Opening a title with a
+  resume point shows "Resume m:ss / Play from start" straight away.
+- Colours: red Movies / subtitles, green Shows / audio, yellow search / quality, blue close / stop;
+  Back closes the top layer (twice on the main screen to leave).
