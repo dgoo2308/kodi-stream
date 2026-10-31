@@ -65,6 +65,11 @@
   html.tv .grid { grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:18px; }
   html.tv .card:hover { outline:3px solid var(--acc); outline-offset:3px; transform:scale(1.04); z-index:1; }
   html.tv button:hover, html.tv a:hover, html.tv .selbtn:hover, html.tv label:hover { outline:3px solid var(--acc); outline-offset:2px; }
+  #toast { position:fixed; left:50%; bottom:40px; transform:translateX(-50%); background:#000d; color:#fff; padding:12px 20px;
+           border-radius:10px; font-size:17px; z-index:60; opacity:0; transition:opacity .2s; pointer-events:none; }
+  #toast.on { opacity:1; }
+  html.tv.wheelnav .card:hover:not(:focus) { outline:none; transform:none; }
+  html.tv.wheelnav .card:focus { outline:3px solid var(--acc); outline-offset:3px; transform:scale(1.04); z-index:1; }
   #tvtip { background:#1d2a38; color:#cfe3ff; font-size:15px; padding:8px 14px; }
   .ck-r { --ck:#e53935; } .ck-g { --ck:#43a047; } .ck-y { --ck:#fdd835; } .ck-b { --ck:#1e88e5; }
   /* in-player picker (audio / subtitles / quality): big buttons, works with a TV remote's arrows + OK */
@@ -380,9 +385,9 @@ function dropLayer(name) {
 }
 window.addEventListener('popstate', () => {
   if (quietPops > 0) { quietPops--; return; }
+  if (!layers.length && !menuOpen() && !playerOn() && !detailOn() && !showId && window.ksAtGuard) return ksAtGuard();
   // close whatever is really on top (self-healing if the bookkeeping and the screen ever disagree)
   layers.pop();
-  if (window.showTvTip) showTvTip();   // a browser Back (not ours): on TVs the remote keys are off until a click
   if (menuOpen()) closePicker(true);
   else if (playerOn()) stopPlay(true);
   else if (detailOn()) closeDetail(true);
@@ -559,6 +564,8 @@ function closePicker(fromHistory) {
 // a click outside an open picker closes it (and does nothing else)
 document.addEventListener('click', e => {
   if (!menuOpen() || $('#pmenu').contains(e.target) || (pick && pick.from && pick.from.contains(e.target))) return;
+  // TV wheel mode: OK lands wherever the hand is but means "pick the row the wheel selected"
+  if (document.documentElement.classList.contains('wheelnav') && $('#pmenu').contains(document.activeElement)) return;
   e.preventDefault(); e.stopPropagation(); closePicker();
 }, true);
 const detailOn = () => $('#detail').classList.contains('on');
@@ -589,31 +596,72 @@ syncSel();
 if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.test(navigator.userAgent) ||
     new URLSearchParams(location.search).has('tv')) {
   document.documentElement.classList.add('tv');
-  // LG's browser only hands remote keys to the page while an element in it has focus (nothing focused =
-  // the TV keeps every key, even colours). So: the pointer focuses what it is over, and the grid always
-  // gets a focused thumbnail after it (re)loads.
+  // Pointer vs wheel. The hand pointer focuses what it is over (LG only hands remote keys to the page
+  // while something in it has focus). The Magic Remote's scroll wheel flips through the titles instead:
+  // one notch = next / previous thumbnail (or picker row), and OK opens what the wheel selected, wherever
+  // the hand is. Moving the hand switches back to plain pointer mode.
+  const root = document.documentElement;
+  let wheelMode = false, wheelAcc = 0, wheelAt = 0, mx = -1, my = -1;
+  const setWheelMode = on => { wheelMode = on; root.classList.toggle('wheelnav', on); };
+  document.addEventListener('mousemove', ev => {
+    if (Math.abs(ev.clientX - mx) + Math.abs(ev.clientY - my) > 6 && Date.now() - wheelAt > 400) setWheelMode(false);
+    mx = ev.clientX; my = ev.clientY;
+  });
   document.addEventListener('mouseover', ev => {
+    if (wheelMode) return;   // content scrolling under a still hand must not steal the wheel selection
     const el = ev.target.closest && ev.target.closest('.card, button, a[href], input, .selbtn');
     if (el && el !== document.activeElement && !el.closest('#player.hidebar')) el.focus({ preventScroll: true });
   });
+  let wheelLogged = false;
+  document.addEventListener('wheel', ev => {
+    if (!wheelLogged) { wheelLogged = true; try { new Image().src = '/api/_diag?ev=wheel&dy=' + Math.round(ev.deltaY) + '&mode=' + ev.deltaMode; } catch (e) {} }
+    if (playerOn() && !menuOpen()) return;
+    const list = menuOpen() ? [...$('#pmenu').querySelectorAll('button')]
+      : detailOn() ? null : [...document.querySelectorAll('#grid .card')];
+    if (!list || !list.length) return;
+    ev.preventDefault();
+    wheelAcc += ev.deltaMode === 1 ? ev.deltaY * 40 : ev.deltaY;
+    if (Math.abs(wheelAcc) < 50 && Date.now() - wheelAt < 250) return;   // one notch at a time
+    const dir = wheelAcc > 0 ? 1 : -1; wheelAcc = 0; wheelAt = Date.now();
+    setWheelMode(true);
+    const i = list.indexOf(document.activeElement);
+    focusEl(list[i < 0 ? 0 : Math.max(0, Math.min(list.length - 1, i + dir))]);
+    if (playerOn()) showBar();
+  }, { passive: false });
+  // OK (= a click where the hand is) opens / picks what the wheel selected
+  document.addEventListener('click', ev => {
+    if (!wheelMode) return;
+    const a = document.activeElement;
+    if (!a || a === document.body || a.contains(ev.target)) return;
+    if (!(a.classList.contains('card') || a.closest('#pmenu'))) return;
+    ev.preventDefault(); ev.stopPropagation();
+    setWheelMode(false);
+    a.click();
+  }, true);
+  // Back on the main screen would leave the app: keep one guard entry in history and ask for a second Back
+  history.pushState({ ksGuard: 1 }, '');
+  let leaveAt = 0;
+  window.ksAtGuard = () => {
+    if (Date.now() - leaveAt < 3000) { history.back(); return; }
+    leaveAt = Date.now();
+    history.pushState({ ksGuard: 1 }, '');
+    toast('Press Back again to leave');
+  };
+  const toastEl = document.createElement('div'); toastEl.id = 'toast'; document.body.appendChild(toastEl);
+  let toastTimer;
+  function toast(t) { toastEl.textContent = t; toastEl.classList.add('on'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('on'), 2800); }
   const marks = { r: ['#pSub', '#tabM', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dClose'] };
   for (const [c, ids] of Object.entries(marks)) ids.forEach(id => $(id).classList.add('ck', 'ck-' + c));
   [['dSub', 'r'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
   // the TV keeps keyboard focus in its own address bar until the first click into the page: say so
-  // (the TV's own Back key does the same: it returns focus to the address bar, while blue closes screens
-  // from inside the page and keeps it), so say so on load and again after a TV Back
   const tip = $('#tvtip');
-  tip.innerHTML = 'Click once on the page, then the remote keys work: <b style="color:#ff6b6b">●</b> Movies ⇄ Shows · ' +
-    '<b style="color:#fdd835">●</b> search · <b style="color:#64b5f6">●</b> close / back. ' +
-    'Close screens with <b style="color:#64b5f6">●</b> blue: the TV\'s Back key switches the remote keys off until the next click.';
+  tip.innerHTML = 'Click once on the page to start. <b>Scroll wheel</b>: flip through titles, <b>OK</b> opens · ' +
+    '<b style="color:#ff6b6b">●</b> Movies ⇄ Shows · <b style="color:#fdd835">●</b> search · <b>Back</b> closes';
   const hideTip = () => { tip.style.display = 'none'; };
-  window.showTvTip = () => {
-    tip.style.display = '';
-    document.addEventListener('click', hideTip, { once: true, capture: true });
-    document.addEventListener('keydown', hideTip, { once: true, capture: true });
-  };
-  showTvTip();
+  tip.style.display = '';
+  document.addEventListener('click', hideTip, { once: true, capture: true });
+  document.addEventListener('keydown', hideTip, { once: true, capture: true });
   // What this LG hotel TV (NetCast UA, Chromium 87) does, measured with a key log on 2026-10-31:
   // arrows never reach the page (they only move the Magic Remote pointer; none of LG's page APIs such as
   // NetCastMouseOff / PalmSystem / webOSSystem / hcap exist to switch it off), Back only navigates
@@ -778,7 +826,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-10';
+const BUILD = 'tvnav-11';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {

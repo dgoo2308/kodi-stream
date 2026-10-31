@@ -254,6 +254,10 @@ UA `Mozilla/5.0 (Linux; NetCast; U) ... Chrome/87.0.3945.79 ... SmartTV/10.0 Col
 - **Colour keys** red 403 / yellow 405 / blue 406 (and 416) arrive **only while the page has keyboard
   focus**, i.e. after the first click into it. A fresh load leaves focus in the TV's address bar.
 - **The TV's Back key** only navigates history (handled: every layer is a history entry, popstate closes
-  the top one) but it also takes keyboard focus away again. Blue closes layers from inside the page and
-  keeps focus, so the TV tip says: close with blue, click once after Back.
+  the top one; colour keys keep working afterwards). On the main screen a guard entry asks "Press Back
+  again to leave" so one Back no longer drops you into the TV browser.
+- **Scroll wheel = browsing**: the Magic Remote wheel does reach the page. One notch = next / previous
+  thumbnail (or picker row) with the page following; OK then opens / picks the wheel selection wherever
+  the hand is (click redirect). Moving the hand returns to plain pointer mode. A one-off
+  `/api/_diag?ev=wheel` line in the access log shows the first wheel event (confirms delivery).
 - TV pages reload themselves when a new `BUILD` is deployed (they otherwise run a cached copy for hours).
