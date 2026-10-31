@@ -361,6 +361,8 @@ async function openItem(it) {
   $('#dOrig').textContent = `⬇ Original (${gb(d.size || 0)})`; $('#dOrig').style.display = '';
   syncSel();
   if (d.resume > 0 && document.activeElement === $('#dPlay')) $('#dResume').focus({ preventScroll: true });
+  // TV: OK on a title means "watch it" -> ask Resume / from start straight away (Back for the options)
+  if (d.resume > 0 && document.documentElement.classList.contains('tv') && detailOn() && !menuOpen()) playMenu();
 }
 // ▶ on the remote while a title is open: "Resume m:ss" / "Play from start" in the picker
 // (straight to playing when there is no resume point)
@@ -683,6 +685,16 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
   [['dSub', 'r'], ['dAudio', 'g'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
   // the TV keeps keyboard focus in its own address bar until the first click into the page: say so
+  const tvlogEarly = o => { try { new Image().src = '/api/_diag?' + new URLSearchParams(Object.assign({ t: Date.now() }, o)); } catch (e) {} };
+  // this TV fires one OK press as two clicks (seen: the start layer closed AND the first title opened in
+  // the same second; an extra click right after Resume toggled pause): drop a repeat within 450 ms
+  let lastOK = 0;
+  window.addEventListener('click', ev => {
+    if (!ev.isTrusted) return;
+    const t = Date.now();
+    if (t - lastOK < 450) { ev.preventDefault(); ev.stopImmediatePropagation(); tvlogEarly({ ev: 'dup-click' }); return; }
+    lastOK = t;
+  }, true);
   const start = $('#tvstart');
   start.style.display = 'flex';
   start.addEventListener('click', ev => {
@@ -896,7 +908,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-19';
+const BUILD = 'tvnav-20';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
