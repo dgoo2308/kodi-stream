@@ -71,6 +71,11 @@
   html.tv.wheelnav .card:hover:not(:focus) { outline:none; transform:none; }
   html.tv.wheelnav, html.tv.wheelnav * { cursor:none !important; }   /* selecting with keys: hide the hand */
   html.tv.wheelnav .card:focus { outline:3px solid var(--acc); outline-offset:3px; transform:scale(1.04); z-index:1; }
+  /* TV: the page only gets the remote's keys after a click into it; a full-screen layer makes that
+     first OK land on the page wherever the cursor is */
+  #tvstart { position:fixed; inset:0; z-index:80; background:#000c; color:#fff; display:flex; flex-direction:column;
+             align-items:center; justify-content:center; gap:12px; font-size:34px; cursor:pointer; text-align:center; }
+  #tvstart small { font-size:18px; color:#bbb; }
   #tvtip { background:#1d2a38; color:#cfe3ff; font-size:15px; padding:8px 14px; }
   .ck-r { --ck:#e53935; } .ck-g { --ck:#43a047; } .ck-y { --ck:#fdd835; } .ck-b { --ck:#1e88e5; }
   /* in-player picker (audio / subtitles / quality): big buttons, works with a TV remote's arrows + OK */
@@ -125,6 +130,7 @@
   <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇</button><a id="acct" class="acct" href="/_devices" title="My devices / sign in a TV" style="display:none">👤</a></div>
 </header>
 <div id="tvtip" style="display:none"></div>
+<div id="tvstart" style="display:none"><div>Press <b>OK</b> to start</div><small>then ⏪ ⏩ select · OK / ▶ opens · Back closes</small></div>
 <main><div id="crumb" style="color:var(--mut);margin:0 0 8px;display:none"></div><div id="grid" class="grid"></div><div id="more"></div></main>
 
 <div id="detail">
@@ -651,7 +657,9 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
   }, { passive: false });
   // OK (= a click where the hand is) opens / picks what the wheel selected
   document.addEventListener('click', ev => {
-    if (!wheelMode) return;
+    // only real OK presses; our own el.click() calls (red = open Subtitles, ...) must reach their target,
+    // otherwise they were redirected to the focused ⏸ and paused the video
+    if (!wheelMode || !ev.isTrusted) return;
     const a = document.activeElement;
     if (!a || a === document.body || a.contains(ev.target)) return;
     if (!a.matches('.card, button, a[href], input[type=checkbox], .selbtn')) return;
@@ -675,6 +683,25 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
   [['dSub', 'r'], ['dAudio', 'g'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
   // the TV keeps keyboard focus in its own address bar until the first click into the page: say so
+  const start = $('#tvstart');
+  start.style.display = 'flex';
+  start.addEventListener('click', ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    start.style.display = 'none';
+    focusCard();
+    if (window.ksSelectMode) ksSelectMode();
+    tvlog({ ev: 'start-click' });
+  });
+  // TEMP: what reaches the page while the player is on (red/yellow pause instead of opening the lists)
+  const tvlog = o => { try { new Image().src = '/api/_diag?' + new URLSearchParams(Object.assign({ t: Date.now() }, o)); } catch (e) {} };
+  window.tvlog = tvlog;
+  const where = el => el ? (el.id || (el.dataset && el.dataset.key) || el.tagName) : '-';
+  window.addEventListener('keydown', ev => { if (playerOn()) tvlog({ ev: 'pkey', kc: ev.keyCode, focus: where(document.activeElement), prevented: ev.defaultPrevented }); });
+  document.addEventListener('click', ev => { if (playerOn()) tvlog({ ev: 'pclick', target: where(ev.target), focus: where(document.activeElement) }); }, true);
+  window.addEventListener('blur', () => { if (playerOn()) tvlog({ ev: 'pblur' }); });
+  window.addEventListener('focus', () => { if (playerOn()) tvlog({ ev: 'pfocus' }); });
+  video.addEventListener('pause', () => tvlog({ ev: 'vpause', focus: where(document.activeElement) }));
+  video.addEventListener('play', () => tvlog({ ev: 'vplay', focus: where(document.activeElement) }));
   const tip = $('#tvtip');
   tip.innerHTML = 'Click once on the page to start. ⏪ ⏩ (or the scroll wheel) select a title, <b>OK</b> / ▶ opens · <b style="color:#ff6b6b">●</b> Movies · <b style="color:#66bb6a">●</b> Shows · ' +
     '<b style="color:#fdd835">●</b> search · <b>Back</b> closes';
@@ -823,7 +850,7 @@ document.addEventListener('keydown', e => {
     if (!window.__mediaLogged) { window.__mediaLogged = true; try { new Image().src = '/api/_diag?ev=media&kc=' + k; } catch (x) {} }
     if (K.PLAY.includes(k) || K.PLAYPAUSE.includes(k)) {
       // on a title's screen ▶ means "watch it": resume / from start as a small menu, or just start
-      if (detailOn() && cur && cur.meta && cur.meta.available && !(ae && ae.classList.contains('selbtn'))) return playMenu();
+      if (detailOn() && cur && cur.meta && cur.meta.available) return playMenu();
       if (ae && ae !== document.body) ae.click();
       return;
     }
@@ -869,7 +896,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-16';
+const BUILD = 'tvnav-19';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
