@@ -139,6 +139,7 @@
     <button class="primary" id="dResume" style="display:none">Resume</button>
     <button class="primary" id="dPlay">Play from start</button>
     <button id="dClose">Close</button>
+    <select id="dStart" style="display:none"></select>
   </div>
   <div class="row">
     <button id="dPrep" title="Encode a phone-friendly MP4 at the chosen quality, then save it from the ⬇ tab">⬇ Prepare MP4</button>
@@ -353,6 +354,16 @@ async function openItem(it) {
   $('#dOrig').textContent = `⬇ Original (${gb(d.size || 0)})`; $('#dOrig').style.display = '';
   syncSel();
   if (d.resume > 0 && document.activeElement === $('#dPlay')) $('#dResume').focus({ preventScroll: true });
+}
+// ▶ on the remote while a title is open: "Resume m:ss" / "Play from start" in the picker
+// (straight to playing when there is no resume point)
+function playMenu() {
+  const at = cur.meta.resume > 0 ? cur.meta.resume : 0;
+  if (!at) return startPlay(0);
+  const sel = $('#dStart');
+  sel.innerHTML = `<option value="resume">▶ Resume ${fmt(at)}</option><option value="start">Play from start</option>`;
+  sel.selectedIndex = -1;   // nothing "current": every row is a choice
+  openPicker(sel, cur.title, $('#dResume'), v => startPlay(v === 'resume' ? at : 0));
 }
 function closeDetail(fromHistory) {
   if (!detailOn()) return;
@@ -799,7 +810,12 @@ document.addEventListener('keydown', e => {
   if (!playerOn() && (K.FF.includes(k) || K.REW.includes(k) || K.PLAY.includes(k) || K.PLAYPAUSE.includes(k))) {
     e.preventDefault();
     if (!window.__mediaLogged) { window.__mediaLogged = true; try { new Image().src = '/api/_diag?ev=media&kc=' + k; } catch (x) {} }
-    if (K.PLAY.includes(k) || K.PLAYPAUSE.includes(k)) { if (ae && ae !== document.body) ae.click(); return; }
+    if (K.PLAY.includes(k) || K.PLAYPAUSE.includes(k)) {
+      // on a title's screen ▶ means "watch it": resume / from start as a small menu, or just start
+      if (detailOn() && cur && cur.meta && cur.meta.available && !(ae && ae.classList.contains('selbtn'))) return playMenu();
+      if (ae && ae !== document.body) ae.click();
+      return;
+    }
     const list = detailOn() ? focusables($('#detail')) : [...document.querySelectorAll('#grid .card')];
     if (!list.length) return;
     const i = list.indexOf(ae);
@@ -842,7 +858,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-12';
+const BUILD = 'tvnav-13';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
