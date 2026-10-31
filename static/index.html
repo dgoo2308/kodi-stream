@@ -47,6 +47,17 @@
   #player.hidebar #pbar { opacity:0; pointer-events:none; }
   #player.hidebar { cursor:none; }
   #pbar button, #pbar select { background:#222; color:var(--fg); border:1px solid #444; border-radius:8px; padding:6px 10px; }
+  #pbar .pick { max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* TV remotes move focus around: make it a clear blue ring instead of the browser's default */
+  #player :focus { outline:3px solid var(--acc); outline-offset:2px; }
+  /* in-player picker (audio / subtitles / quality): big buttons, works with a TV remote's arrows + OK */
+  #pmenu { position:absolute; right:14px; bottom:84px; z-index:3; display:none; flex-direction:column; gap:6px;
+           min-width:240px; max-width:min(420px, 92vw); max-height:60vh; overflow:auto; padding:12px;
+           background:#141414f2; border:1px solid #333; border-radius:12px; }
+  #pmenu.on { display:flex; }
+  #pmenu .ttl { color:var(--mut); font-size:13px; padding:0 4px 4px; }
+  #pmenu button { text-align:left; font-size:17px; padding:11px 14px; background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; }
+  #pmenu button.cur { border-color:var(--acc); color:var(--acc); }
   #seek { flex:1; min-width:160px; }
   #ptitle { width:100%; color:#fff; font-weight:600; }
   #msg { color:#fc6; }
@@ -118,14 +129,15 @@
     <input id="seek" type="range" min="0" max="1000" value="0">
     <span id="tdur">0:00</span>
     <button id="bBack">−15s</button><button id="bFwd">+30s</button>
-    <select id="pAudio" title="Audio" style="max-width:150px"></select>
-    <select id="pSub" title="Subtitles" style="max-width:150px"></select>
-    <select id="pQ" title="Quality"></select>
+    <button id="pAudio" class="pick" title="Audio"></button>
+    <button id="pSub" class="pick" title="Subtitles"></button>
+    <button id="pQ" class="pick" title="Quality"></button>
     <button id="bFull">⛶</button>
     <button id="bStop">Stop</button>
     <span id="msg"></span>
     <span id="buf"></span>
   </div>
+  <div id="pmenu" role="menu"></div>
 </div>
 
 <script src="hls.min.js"></script>
@@ -373,12 +385,14 @@ async function stopPlay() {
   sess = null; $('#player').classList.remove('on'); await post('/stop', {}); load(!showId);
 }
 
-// auto-hide the control bar during playback; show on mouse move / tap / pause
+// auto-hide the control bar during playback; show on mouse move / tap / remote key / pause.
+// Never hide while a picker menu is open (a TV remote sends keys, not mouse moves).
 let barTimer;
+const menuOpen = () => $('#pmenu').classList.contains('on');
 function showBar() {
   const pl = $('#player'); pl.classList.remove('hidebar');
   clearTimeout(barTimer);
-  barTimer = setTimeout(() => { if (!video.paused) pl.classList.add('hidebar'); }, 3000);
+  barTimer = setTimeout(() => { if (!video.paused && !menuOpen()) pl.classList.add('hidebar'); }, 4000);
 }
 $('#player').addEventListener('mousemove', showBar);
 $('#player').addEventListener('touchstart', showBar, { passive: true });
@@ -386,17 +400,66 @@ $('#player').addEventListener('click', showBar);
 video.addEventListener('pause', () => { clearTimeout(barTimer); $('#player').classList.remove('hidebar'); });
 video.addEventListener('play', showBar);
 
-// in-player audio / subtitle / quality pickers: mirror the detail sheet, switch by restarting at the current position
+// in-player audio / subtitle / quality pickers: our own menu instead of <select> (TV browsers drop
+// native dropdowns); options mirror the detail sheet, a change restarts at the current position
+const PICKS = { '#pAudio': ['#dAudio', 'Audio'], '#pSub': ['#dSub', 'Subtitles'], '#pQ': ['#dQ', 'Quality'] };
 function syncPlayerSubs() {
-  for (const [pid, did] of [['#pAudio', '#dAudio'], ['#pSub', '#dSub'], ['#pQ', '#dQ']]) {
-    const p = $(pid), d = $(did);
-    p.innerHTML = d.innerHTML; p.value = d.value;
-    p.style.display = p.options.length > 1 ? '' : 'none';
+  for (const [pid, [did, name]] of Object.entries(PICKS)) {
+    const p = $(pid), d = $(did), o = d.options[d.selectedIndex];
+    p.textContent = name === 'Subtitles' ? 'Subs: ' + (d.value ? (o ? o.textContent.trim() : '') : 'off') : (o ? o.textContent.trim() : name);
+    p.style.display = d.options.length > 1 ? '' : 'none';
   }
 }
-$('#pAudio').onchange = () => { $('#dAudio').value = $('#pAudio').value; seekTo(absPos(), true); };
-$('#pSub').onchange = () => { $('#dSub').value = $('#pSub').value; seekTo(absPos(), true); };
-$('#pQ').onchange = () => { $('#dQ').value = $('#pQ').value; $('#dQ').onchange(); seekTo(absPos(), true); };
+let menuFrom = null;
+function openMenu(pid) {
+  const [did, name] = PICKS[pid], d = $(did), m = $('#pmenu');
+  menuFrom = pid;
+  m.innerHTML = `<div class="ttl">${name}</div>`;
+  for (const o of d.options) {
+    const b = document.createElement('button');
+    b.textContent = (o.value === '' && name === 'Subtitles') ? 'Off' : o.textContent.trim();
+    if (o.value === d.value) b.className = 'cur';
+    b.onclick = e => {
+      e.stopPropagation(); closeMenu();
+      if (o.value === d.value) return;
+      d.value = o.value; if (did === '#dQ') d.onchange();
+      syncPlayerSubs(); seekTo(absPos(), true);
+    };
+    m.appendChild(b);
+  }
+  m.classList.add('on'); showBar();
+  (m.querySelector('button.cur') || m.querySelector('button')).focus();
+}
+function closeMenu() {
+  $('#pmenu').classList.remove('on');
+  if (menuFrom) $(menuFrom).focus();
+  menuFrom = null; showBar();
+}
+for (const pid of Object.keys(PICKS)) $(pid).onclick = e => { e.stopPropagation(); menuOpen() && menuFrom === pid ? closeMenu() : openMenu(pid); };
+$('#pmenu').addEventListener('click', e => e.stopPropagation());
+
+// TV remote / keyboard: any key brings the bar back (and is swallowed while the bar was hidden, so
+// OK on a hidden button does nothing); arrows move inside an open menu; Back/Esc closes it;
+// media keys play/pause/seek.
+const K = { BACK: [27, 8, 461, 10009], PLAY: [415], PAUSE: [19], PLAYPAUSE: [179, 10252], FF: [417, 228], REW: [412, 227] };
+document.addEventListener('keydown', e => {
+  if (!$('#player').classList.contains('on')) return;
+  const k = e.keyCode;
+  if (K.PLAY.includes(k)) { video.play(); return e.preventDefault(); }
+  if (K.PAUSE.includes(k)) { video.pause(); saveProgress(); return e.preventDefault(); }
+  if (K.PLAYPAUSE.includes(k)) { $('#bPlay').onclick(); return e.preventDefault(); }
+  if (K.FF.includes(k)) { seekTo(absPos() + 30); showBar(); return e.preventDefault(); }
+  if (K.REW.includes(k)) { seekTo(absPos() - 15); showBar(); return e.preventDefault(); }
+  if (menuOpen()) {
+    const bs = [...$('#pmenu').querySelectorAll('button')], i = bs.indexOf(document.activeElement);
+    if (K.BACK.includes(k)) { closeMenu(); return e.preventDefault(); }
+    if (k === 38 || k === 40) { (bs[i < 0 ? 0 : Math.max(0, Math.min(bs.length - 1, i + (k === 40 ? 1 : -1)))]).focus(); showBar(); return e.preventDefault(); }
+    showBar(); return;
+  }
+  const hidden = $('#player').classList.contains('hidebar');
+  showBar();
+  if (hidden) { e.preventDefault(); e.stopPropagation(); if (!$('#pbar').contains(document.activeElement)) $('#bPlay').focus(); }
+}, true);
 video.onended = () => { saveProgress(); };
 window.addEventListener('pagehide', () => { if ($('#player').classList.contains('on')) saveProgress(true); });
 // device list / phone sign-in only exist behind the VPS login, not on the LAN site
