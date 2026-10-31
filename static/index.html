@@ -603,6 +603,7 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
   const root = document.documentElement;
   let wheelMode = false, wheelAcc = 0, wheelAt = 0, mx = -1, my = -1;
   const setWheelMode = on => { wheelMode = on; root.classList.toggle('wheelnav', on); };
+  window.ksSelectMode = () => { setWheelMode(true); wheelAt = Date.now(); };
   document.addEventListener('mousemove', ev => {
     if (Math.abs(ev.clientX - mx) + Math.abs(ev.clientY - my) > 6 && Date.now() - wheelAt > 400) setWheelMode(false);
     mx = ev.clientX; my = ev.clientY;
@@ -764,7 +765,9 @@ document.addEventListener('keydown', e => {
   if (menuOpen()) {
     if (K.BACK.includes(k) || k === 406 || k === 416) { closePicker(); return e.preventDefault(); }
     const bs = [...$('#pmenu').querySelectorAll('button')], i = bs.indexOf(ae);
-    const step = k === 40 ? 1 : k === 38 ? -1 : k === 34 ? 8 : k === 33 ? -8 : 0;
+    if (K.PLAY.includes(k) || K.PLAYPAUSE.includes(k)) { if (bs.includes(ae)) ae.click(); return e.preventDefault(); }
+    const step = k === 40 || K.FF.includes(k) ? 1 : k === 38 || K.REW.includes(k) ? -1 : k === 34 ? 8 : k === 33 ? -8 : 0;
+    if (step && (K.FF.includes(k) || K.REW.includes(k)) && window.ksSelectMode) ksSelectMode();
     if (step) {
       let j = i < 0 ? 0 : i + step;
       j = Math.abs(step) === 1 ? (j + bs.length) % bs.length : Math.max(0, Math.min(bs.length - 1, j));
@@ -789,6 +792,19 @@ document.addEventListener('keydown', e => {
     else if (color === 'y') focusEl($('#q'));
     else if (color === 'g') setTab('show').then(() => focusCard());
     else setTab(tab === 'movie' ? 'show' : 'movie').then(() => focusCard());
+    return;
+  }
+  // outside the player the media keys browse: ⏩ / ⏪ = next / previous title (or control on the detail
+  // sheet), ▶ = open what is highlighted. On pointer TVs OK then also opens the highlighted title.
+  if (!playerOn() && (K.FF.includes(k) || K.REW.includes(k) || K.PLAY.includes(k) || K.PLAYPAUSE.includes(k))) {
+    e.preventDefault();
+    if (!window.__mediaLogged) { window.__mediaLogged = true; try { new Image().src = '/api/_diag?ev=media&kc=' + k; } catch (x) {} }
+    if (K.PLAY.includes(k) || K.PLAYPAUSE.includes(k)) { if (ae && ae !== document.body) ae.click(); return; }
+    const list = detailOn() ? focusables($('#detail')) : [...document.querySelectorAll('#grid .card')];
+    if (!list.length) return;
+    const i = list.indexOf(ae);
+    focusEl(list[i < 0 ? 0 : Math.max(0, Math.min(list.length - 1, i + (K.FF.includes(k) ? 1 : -1)))]);
+    if (window.ksSelectMode) ksSelectMode();
     return;
   }
   // the remote's own Stop key: stop and go back to the titles (focus lands on the one that played)
@@ -826,7 +842,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-11';
+const BUILD = 'tvnav-12';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
