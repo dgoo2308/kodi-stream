@@ -49,6 +49,15 @@
   #seek { flex:1; min-width:160px; }
   #ptitle { width:100%; color:#fff; font-weight:600; }
   #msg { color:#fc6; }
+  #buf { color:var(--mut); }
+  a.btn { background:#222; color:var(--fg); border:1px solid #444; border-radius:8px; padding:8px 12px; font-size:15px; text-decoration:none; }
+  .dl { grid-column:1/-1; display:flex; flex-direction:column; gap:10px; max-width:720px; }
+  .dl .job { background:var(--card); border-radius:10px; padding:10px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .dl .job .name { flex:1 1 220px; min-width:0; }
+  .dl .job small { color:var(--mut); display:block; }
+  .dl .job .prog { flex:1 1 100%; height:4px; background:#333; border-radius:2px; overflow:hidden; }
+  .dl .job .prog div { height:100%; background:var(--acc); }
+  .dl .job button { background:#222; color:var(--fg); border:1px solid #444; border-radius:8px; padding:6px 10px; }
   #detail { position:fixed; inset:auto 0 0 0; background:#181818; border-top:1px solid #333; padding:14px 16px 24px; z-index:6; display:none; }
   #detail.on { display:block; }
   #detail h2 { margin:0 0 6px; font-size:17px; }
@@ -74,7 +83,7 @@
     <select id="fGenre" title="Genre"><option value="">All genres</option></select>
     <label><input type="checkbox" id="fUnw"> Unwatched</label>
   </div>
-  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button></div>
+  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇</button></div>
 </header>
 <main><div id="crumb" style="color:var(--mut);margin:0 0 8px;display:none"></div><div id="grid" class="grid"></div><div id="more"></div></main>
 
@@ -84,12 +93,18 @@
   <div class="row">
     <label>Audio <select id="dAudio"></select></label>
     <label>Subtitles <select id="dSub"><option value="">none</option></select></label>
+    <label>Quality <select id="dQ"><option value="720p">720p</option><option value="540p">540p</option><option value="360p">360p</option></select></label>
     <label>Encoder <select id="dEnc"><option value="x264">SW (x264)</option><option value="rkmpp">HW (rkmpp)</option></select></label>
   </div>
   <div class="row">
     <button class="primary" id="dResume" style="display:none">Resume</button>
     <button class="primary" id="dPlay">Play from start</button>
     <button id="dClose">Close</button>
+  </div>
+  <div class="row">
+    <button id="dPrep" title="Encode a phone-friendly MP4 at the chosen quality, then save it from the ⬇ tab">⬇ Prepare MP4</button>
+    <a id="dOrig" class="btn" href="#" style="display:none">⬇ Original</a>
+    <span class="info" id="dDlMsg"></span>
   </div>
 </div>
 
@@ -104,9 +119,11 @@
     <button id="bBack">−15s</button><button id="bFwd">+30s</button>
     <select id="pAudio" title="Audio" style="max-width:150px"></select>
     <select id="pSub" title="Subtitles" style="max-width:150px"></select>
+    <select id="pQ" title="Quality"></select>
     <button id="bFull">⛶</button>
     <button id="bStop">Stop</button>
     <span id="msg"></span>
+    <span id="buf"></span>
   </div>
 </div>
 
@@ -165,6 +182,7 @@ async function nextPage() {
   if (!paging.done && $('#more').getBoundingClientRect().top < innerHeight + 600) return nextPage();  // screen not full yet
 }
 async function load(keep) {
+  if (tab === 'dl') return loadDownloads();
   const grid = $('#grid');
   paging.gen++;
   $('#filters').classList.toggle('hide', !!showId);
@@ -185,16 +203,53 @@ $('#q').oninput = () => { clearTimeout(window._t); window._t = setTimeout(() => 
 for (const el of ['#fSort', '#fGenre', '#fUnw']) $(el).onchange = () => { savePrefs(); scrollTo(0, 0); load(); };
 async function setTab(t) {
   tab = t; showId = null;
-  $('#tabM').classList.toggle('on', t === 'movie'); $('#tabS').classList.toggle('on', t === 'show');
+  $('#tabM').classList.toggle('on', t === 'movie'); $('#tabS').classList.toggle('on', t === 'show'); $('#tabD').classList.toggle('on', t === 'dl');
+  $('#crumb').style.display = 'none';
+  if (t === 'dl') { paging.gen++; paging.done = true; $('#filters').classList.add('hide'); scrollTo(0, 0); return loadDownloads(); }
   await restorePrefs(); scrollTo(0, 0); load();
 }
 $('#tabM').onclick = () => setTab('movie');
 $('#tabS').onclick = () => setTab('show');
+$('#tabD').onclick = () => setTab('dl');
+
+// ---------------- downloads (prepared MP4s live on the box; Save hands the file to the browser)
+const gb = n => (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + ' GB';
+const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let dlTimer = null;
+async function loadDownloads() {
+  clearTimeout(dlTimer);
+  if (tab !== 'dl') return;
+  const r = await api('/downloads').catch(() => ({ jobs: [] }));
+  if (tab !== 'dl') return;
+  const grid = $('#grid'); grid.innerHTML = '';
+  const box = document.createElement('div'); box.className = 'dl';
+  box.innerHTML = `<div class="info" style="color:var(--mut)">Prepared MP4s stay on the box for a week. Pick a title, choose a quality, then “Prepare MP4”.` +
+    (r.free_gb != null ? ` ${r.free_gb} GB free.` : '') + `</div>`;
+  if (!r.jobs.length) box.innerHTML += '<div class="empty">No downloads yet</div>';
+  for (const j of r.jobs) {
+    const el = document.createElement('div'); el.className = 'job';
+    const state = j.state === 'done' ? gb(j.size || 0) : j.state === 'running' ? `encoding ${Math.round(100 * j.progress)}%`
+      : j.state === 'queued' ? (j.note || 'queued') : 'failed: ' + esc(j.error);
+    el.innerHTML = `<div class="name">${esc(j.title)}<small>${esc(j.quality)} · ${state}</small></div>` +
+      (j.state === 'done' ? `<a class="btn" href="${j.url}" download="${esc(j.filename)}">Save</a>` : '') +
+      `<button>Delete</button>` +
+      (j.state === 'running' || j.state === 'queued' ? `<div class="prog"><div style="width:${100 * j.progress}%"></div></div>` : '');
+    el.querySelector('button').onclick = async () => { await post('/download/delete', { name: j.name }); loadDownloads(); };
+    box.appendChild(el);
+  }
+  grid.appendChild(box);
+  if (r.jobs.some(j => j.state === 'running' || j.state === 'queued')) dlTimer = setTimeout(loadDownloads, 3000);
+}
 
 // ---------------- detail sheet
+let quality = '720p';
+try { quality = localStorage.getItem('ks.quality') || quality; } catch (e) {}
+$('#dQ').value = quality; if (!$('#dQ').value) $('#dQ').value = '720p';
+$('#dQ').onchange = () => { quality = $('#dQ').value; try { localStorage.setItem('ks.quality', quality); } catch (e) {} };
 async function openItem(it) {
   cur = { type: it.type, id: it.id, title: it.type === 'episode' ? `${it.show} S${it.season}E${it.episode} · ${it.title}` : it.title };
   $('#dTitle').textContent = cur.title; $('#dInfo').textContent = 'Probing…'; $('#detail').classList.add('on');
+  $('#dDlMsg').textContent = ''; $('#dOrig').style.display = 'none';
   const d = await api(`/item/${it.type}/${it.id}`);
   cur.meta = d;
   if (!d.available) { $('#dInfo').textContent = 'File not available (LaCie unplugged?)'; return; }
@@ -207,19 +262,33 @@ async function openItem(it) {
   d.probe.subs.filter(s => s.text).forEach(s => { const o = document.createElement('option'); o.value = s.path ? 'ext:' + s.path : s.index; o.textContent = `${s.lang||'?'} ${s.codec}${s.path ? ' (file)' : ''} ${s.title||''}`; sb.appendChild(o); });
   $('#dResume').style.display = d.resume > 0 ? '' : 'none';
   $('#dResume').textContent = `Resume ${fmt(d.resume)}`;
+  $('#dOrig').href = `/api/download/original/${it.type}/${it.id}`;
+  $('#dOrig').textContent = `⬇ Original (${gb(d.size || 0)})`; $('#dOrig').style.display = '';
 }
 $('#dClose').onclick = () => $('#detail').classList.remove('on');
 $('#dPlay').onclick = () => startPlay(0);
 $('#dResume').onclick = () => startPlay(cur.meta.resume);
+$('#dPrep').onclick = async () => {
+  if (!cur || !cur.meta || !cur.meta.available) return;
+  const audio = $('#dAudio').value === '' ? null : Number($('#dAudio').value);
+  const r = await post('/download', { type: cur.type, id: cur.id, quality: $('#dQ').value, audio, sub: $('#dSub').value || null });
+  $('#dDlMsg').textContent = r.error ? r.error : r.state === 'done' ? 'Ready in the ⬇ tab' : 'Queued, progress in the ⬇ tab';
+};
 
 // ---------------- player
-const video = $('#video'); let hls = null, offset = 0, duration = 0, mode = '', ticker = null, lastSave = 0;
+// Sessions are EVENT playlists: the box keeps every segment it made until Stop and encodes ahead
+// of playback, so pausing never loses the place and seeks inside the produced range need no restart.
+const video = $('#video'); let hls = null, offset = 0, duration = 0, mode = '', ticker = null, lastSave = 0, sess = null, sessAt = 0;
 function absPos() { return offset + (video.currentTime || 0); }
+function playBody(at) {
+  const audio = $('#dAudio').value === '' ? null : Number($('#dAudio').value);
+  return { type: cur.type, id: cur.id, offset: at, audio, sub: $('#dSub').value || null, enc: $('#dEnc').value, quality: $('#dQ').value };
+}
 async function startPlay(at) {
   $('#detail').classList.remove('on'); $('#player').classList.add('on'); $('#ptitle').textContent = cur.title; $('#msg').textContent = 'Starting…';
-  const res = await post('/play', { type: cur.type, id: cur.id, offset: at, audio: Number($('#dAudio').value), sub: $('#dSub').value || null, enc: $('#dEnc').value });
+  const res = await post('/play', playBody(at));
   if (res.error) { $('#msg').textContent = res.error; return; }
-  mode = res.mode; duration = res.duration || cur.meta.probe.duration; offset = res.offset || 0;
+  mode = res.mode; duration = res.duration || cur.meta.probe.duration; offset = res.offset || 0; sess = res;
   $('#tdur').textContent = fmt(duration); $('#msg').textContent = '';
   syncPlayerSubs();
   attach(res.url, at);
@@ -230,11 +299,18 @@ function attach(url, at) {
   if (mode === 'direct') { video.src = url; video.currentTime = at || 0; video.play().catch(()=>{}); return; }
   const start = () => {
     if (!(window.Hls && Hls.isSupported())) {  // iOS Safari: no MSE, native HLS
-      if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = url; video.play().catch(()=>{}); }
+      if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari starts an unfinished (EVENT) playlist near its end; begin at the session start instead
+        video.addEventListener('loadedmetadata', () => { if (video.currentTime > 1) video.currentTime = 0; }, { once: true });
+        video.src = url; video.play().catch(()=>{});
+      }
       else $('#msg').textContent = 'HLS not supported by this browser';
       return;
     }
-    hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 6, maxBufferLength: 20, enableWorker: true });
+    // startPosition 0 + no live-latency limits: never chase the "live edge" (that was the jump after
+    // a pause); buffer generously so a weak connection rides out dips
+    hls = new Hls({ startPosition: 0, maxBufferLength: 120, maxMaxBufferLength: 600, backBufferLength: 120,
+                    maxBufferSize: 200 * 1000 * 1000, enableWorker: true });
     hls.loadSource(url); hls.attachMedia(video);
     hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(()=>{}); if (hls.subtitleTracks.length) hls.subtitleTrack = 0; });
     hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) { $('#msg').textContent = 'stream error: ' + d.type; if (d.type === 'networkError') setTimeout(() => hls && hls.startLoad(), 1500); } });
@@ -242,29 +318,46 @@ function attach(url, at) {
   // wait for the master playlist to exist
   (async function poll(n) {
     const s = await api('/session');
-    if (s.ready) return start();
+    if (s.ready) { sess = s; sessAt = Date.now(); return start(); }
     if (!s.alive) { $('#msg').textContent = 'encoder stopped: ' + (s.error || 'see log'); return; }
     if (n < 40) setTimeout(() => poll(n+1), 500); else $('#msg').textContent = 'timeout waiting for stream';
   })(0);
+}
+function bufferedAhead() {
+  const b = video.buffered, t = video.currentTime;
+  for (let i = 0; i < b.length; i++) if (b.start(i) <= t + 0.5 && t <= b.end(i)) return b.end(i) - t;
+  return 0;
 }
 function tick() {
   if (!$('#player').classList.contains('on')) return;
   const pos = absPos(); $('#tcur').textContent = fmt(pos);
   if (duration && !$('#seek').dragging) $('#seek').value = Math.round(1000 * pos / duration);
   if (Date.now() - lastSave > 30000 && !video.paused) saveProgress();
+  if (mode !== 'direct' && sess && sess.session && Date.now() - sessAt > 5000) {
+    sessAt = Date.now();
+    api('/session').then(s => { if (sess && s.session === sess.session) sess = s; }).catch(() => {});
+  }
+  // how far ahead this device has buffered, and how far the box has encoded
+  const made = mode !== 'direct' && sess && sess.produced != null
+    ? (sess.complete ? ' · box: done' : ` · box: +${fmt(Math.max(0, sess.produced - pos))}`) : '';
+  $('#buf').textContent = `buffered ${fmt(bufferedAhead())}${made}`;
 }
 function saveProgress(beacon) {
   lastSave = Date.now(); const body = JSON.stringify({ type: cur.type, id: cur.id, position: absPos(), duration });
   if (beacon && navigator.sendBeacon) navigator.sendBeacon('/api/progress', new Blob([body], {type:'application/json'}));
   else fetch('/api/progress', { method:'POST', headers:{'Content-Type':'application/json'}, body });
 }
-async function seekTo(t) {
+async function seekTo(t, restart) {
   t = Math.max(0, Math.min(duration - 5, t));
   if (mode === 'direct') { video.currentTime = t; return; }
+  // inside what this session has already produced: plain player seek, no new encode
+  if (!restart && sess && t >= offset && t <= (sess.complete ? duration : (sess.produced || 0) - 4)) {
+    video.currentTime = t - offset; return;
+  }
   $('#msg').textContent = 'seeking…'; saveProgress();
-  const res = await post('/play', { type: cur.type, id: cur.id, offset: t, audio: Number($('#dAudio').value), sub: $('#dSub').value || null, enc: $('#dEnc').value });
+  const res = await post('/play', playBody(t));
   if (res.error) { $('#msg').textContent = res.error; return; }
-  offset = res.offset; $('#msg').textContent = ''; attach(res.url, t);
+  offset = res.offset; sess = res; $('#msg').textContent = ''; attach(res.url, t);
 }
 $('#seek').oninput = e => { e.target.dragging = true; $('#tcur').textContent = fmt(duration * e.target.value / 1000); };
 $('#seek').onchange = e => { e.target.dragging = false; seekTo(duration * e.target.value / 1000); };
@@ -276,7 +369,7 @@ $('#bFull').onclick = () => { const el = $('#player'); (el.requestFullscreen || 
 $('#bStop').onclick = stopPlay;
 async function stopPlay() {
   saveProgress(); clearInterval(ticker); if (hls) { hls.destroy(); hls = null; } video.pause(); video.removeAttribute('src'); video.load();
-  $('#player').classList.remove('on'); await post('/stop', {}); load(!showId);
+  sess = null; $('#player').classList.remove('on'); await post('/stop', {}); load(!showId);
 }
 
 // auto-hide the control bar during playback; show on mouse move / tap / pause
@@ -292,16 +385,17 @@ $('#player').addEventListener('click', showBar);
 video.addEventListener('pause', () => { clearTimeout(barTimer); $('#player').classList.remove('hidebar'); });
 video.addEventListener('play', showBar);
 
-// in-player subtitle picker: mirror the detail list, switch by restarting at the current position
+// in-player audio / subtitle / quality pickers: mirror the detail sheet, switch by restarting at the current position
 function syncPlayerSubs() {
-  for (const [pid, did] of [['#pAudio', '#dAudio'], ['#pSub', '#dSub']]) {
+  for (const [pid, did] of [['#pAudio', '#dAudio'], ['#pSub', '#dSub'], ['#pQ', '#dQ']]) {
     const p = $(pid), d = $(did);
     p.innerHTML = d.innerHTML; p.value = d.value;
     p.style.display = p.options.length > 1 ? '' : 'none';
   }
 }
-$('#pAudio').onchange = () => { $('#dAudio').value = $('#pAudio').value; seekTo(absPos()); };
-$('#pSub').onchange = () => { $('#dSub').value = $('#pSub').value; seekTo(absPos()); };
+$('#pAudio').onchange = () => { $('#dAudio').value = $('#pAudio').value; seekTo(absPos(), true); };
+$('#pSub').onchange = () => { $('#dSub').value = $('#pSub').value; seekTo(absPos(), true); };
+$('#pQ').onchange = () => { $('#dQ').value = $('#pQ').value; $('#dQ').onchange(); seekTo(absPos(), true); };
 video.onended = () => { saveProgress(); };
 window.addEventListener('pagehide', () => { if ($('#player').classList.contains('on')) saveProgress(true); });
 setTab('movie');

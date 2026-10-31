@@ -9,8 +9,11 @@ iOS-Keychain-friendly cookie login. Companion to [torrent-adder](https://github.
 - **Catalogue** from Kodi's `MyVideos*.db` (read-only): movies, shows, seasons, episodes, posters, search,
   sort (recently added / title / release / top rated / recently watched), genre and unwatched filters,
   infinite scroll over the whole library.
-- **Playback** decided per item: direct play, remux, or transcode to 720p on the fly, real-time paced,
-  as a rolling HLS window on the NVMe (nothing persisted).
+- **Playback** decided per item: direct play, remux, or transcode on the fly at 720p / 540p / 360p,
+  as an HLS EVENT playlist encoded ahead of playback (pause keeps its place, slow links buffer ahead;
+  wiped on stop).
+- **Downloads**: the original file, or a phone-friendly MP4 prepared on the box at the chosen quality
+  (⬇ tab, pruned after a week).
 - **Player** (single page, `static/index.html` + vendored hls.js): full-movie seek, ±skip, audio &
   subtitle pickers, fullscreen, auto-hiding controls; seeking/track-change restart the transcode at the point.
 - **Resume + watched** shared with Kodi (JSON-RPC when Kodi runs, the library DB `bookmark`/`files`
@@ -30,7 +33,7 @@ Full investigation and decisions: [`docs/kodi-stream.md`](docs/kodi-stream.md).
 ## Layout
 - `stream-api.py` — the service (stdlib `ThreadingHTTPServer`): catalogue, session manager, resume sync.
 - `static/` — the player page + vendored `hls.min.js`.
-- `nginx-kodi-stream.conf` — box nginx site for the frp tunnel (127.0.0.1:8088: static + `/hls/` + `/api/` proxy + internal `/media/`).
+- `nginx-kodi-stream.conf` — box nginx site for the frp tunnel (127.0.0.1:8088: static + `/hls/` + `/api/` proxy + internal `/media/`, `/thumbcache/`, `/dlcache/`).
 - `nginx-kodi-stream-lan.conf` — box nginx site for the LAN (`:80`, `kodi.local`); same locations, keep the two in step.
 - `kodi-stream.service` — systemd unit (user `pi`, memory/CPU caps).
 - `vps/` — VPS side: `stream-auth.py` (cookie login), its unit, and the `stream.nellika.io` nginx vhost.

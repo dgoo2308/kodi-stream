@@ -39,16 +39,23 @@ CONFIG = {
     "kodi_rpc": "http://127.0.0.1:8080/jsonrpc",
     "kodi_user": "kodi",
     "kodi_pass": "kodi",
-    "max_width": 1280,
-    "video_bitrate": "2500k",
-    "audio_bitrate": "128k",
     "direct_max_bitrate": 3500000,
     "hls_time": 4,
-    "hls_list_size": 8,
     "chunk_lead_seconds": 12,           # HW-encode chunked path: how far ahead of playback to stay
     "hw_decode_codecs": ["h264", "hevc", "vp9", "vp8", "mpeg2video", "av1"],
     "min_mem_available_kb": 800000,
-    "pace_realtime": True,
+    # Sessions are EVENT playlists that keep every segment until stop, so pause never loses
+    # anything and a slow client can buffer ahead. pace_readrate: 0 = encode as fast as the box
+    # can (cleanest decode, Nice/CPUWeight keep Kodi first), N = -readrate N. None falls back to
+    # the old pace_realtime flag (True = 1x).
+    "pace_readrate": None,
+    "pace_realtime": False,
+    # selectable stream/download quality: name -> [max width, video bitrate, audio bitrate]
+    "qualities": {"720p": [1280, "2500k", "128k"], "540p": [960, "1200k", "96k"], "360p": [640, "600k", "64k"]},
+    "default_quality": "720p",
+    "download_dir": "/home/pi/kodi-stream-dl",  # prepared MP4 downloads (nginx internal alias /dlcache/)
+    "download_keep_days": 7,
+    "download_max_gb": 30,
     "extra_hw_frames": 12,
     "ffmpeg_x264": "/usr/bin/ffmpeg",  # software libx264 (~1 core @ realtime, 720p)
     "default_encoder": "x264",         # "x264" | "rkmpp". SW encode (x264) is the shipping default;
@@ -326,15 +333,60 @@ def parse_fps(s):
         return 24.0
 
 
-def decide(probe, audio_idx, sub_sel):
-    """Return one of direct / remux / transcode-hw / transcode-sw."""
+def quality(name):
+    """(name, max width, video bitrate, audio bitrate) for a quality name; unknown -> default."""
+    qs = CONFIG["qualities"]
+    if name not in qs:
+        name = CONFIG["default_quality"] if CONFIG["default_quality"] in qs else next(iter(qs))
+    w, vb, ab = qs[name]
+    return name, int(w), str(vb), str(ab)
+
+
+def bitrate_bps(s):
+    s = str(s).strip().lower()
+    mult = 1000 if s.endswith("k") else 1000000 if s.endswith("m") else 1
+    return int(float(s.rstrip("km")) * mult)
+
+
+def pace_args():
+    """Decoder input pacing: [] (as fast as possible), -re (1x) or -readrate N."""
+    r = CONFIG.get("pace_readrate")
+    if r is None:
+        r = 1 if CONFIG.get("pace_realtime") else 0
+    r = float(r or 0)
+    if r <= 0:
+        return []
+    return ["-re"] if r == 1 else ["-readrate", "%g" % r]
+
+
+def video_geometry(v, max_w):
+    """(out width, out height, fps) for a probed video stream scaled down to max_w."""
+    width, height = int(v["width"]), int(v["height"])
+    fps = parse_fps(v.get("avg_frame_rate") or v.get("r_frame_rate") or "24")
+    if fps <= 0 or fps > 120:
+        fps = parse_fps(v.get("r_frame_rate") or "24")
+    ow = min(max_w, width) & ~1
+    oh = int(round(height * ow / width)) & ~1
+    return ow, oh, fps
+
+
+def default_audio(probe):
+    eng = [a for a in probe["audio"] if a["lang"] in ("eng", "en")]
+    return (eng or probe["audio"] or [{"index": None}])[0]["index"]
+
+
+def decide(probe, audio_idx, sub_sel, q=None):
+    """Return one of direct / remux / transcode-hw / transcode-sw. A source only passes through
+    untouched when it already fits the chosen quality (width and bitrate)."""
+    q = q or quality(None)
     v = probe["video"]
     if not v:
         return "transcode-sw"
     codec = v.get("codec_name")
     width = int(v.get("width") or 0)
     eight_bit = v.get("pix_fmt") in EIGHT_BIT
-    fits = codec == "h264" and width <= CONFIG["max_width"] and 0 < probe["bit_rate"] <= CONFIG["direct_max_bitrate"] and eight_bit
+    max_br = min(CONFIG["direct_max_bitrate"], int(bitrate_bps(q[2]) * 1.4))
+    fits = codec == "h264" and width <= q[1] and 0 < probe["bit_rate"] <= max_br and eight_bit
     a = next((a for a in probe["audio"] if a["index"] == audio_idx), None)
     container_ok = any(x in probe["format"] for x in ("mp4", "mov"))
     if fits and container_ok and a and a["codec"] == "aac" and not sub_sel:
@@ -344,6 +396,39 @@ def decide(probe, audio_idx, sub_sel):
     if codec in CONFIG["hw_decode_codecs"] and eight_bit:
         return "transcode-hw"
     return "transcode-sw"
+
+
+def transcode_cmds(path, probe, offset, q, mode, enc="x264", pace=()):
+    """Stage 1 (decode -> raw NV12 on stdout) and stage 2 (video-only encode -> H.264 mpegts on
+    stdout) argv lists, shared by streaming sessions and prepared downloads."""
+    v = probe["video"]
+    ow, oh, fps = video_geometry(v, q[1])
+    ss = ["-ss", "%.3f" % offset] if offset > 0 else []
+    hw = mode == "transcode-hw"
+    dec = [CONFIG["ffmpeg_decode"], "-nostdin", "-hide_banner", "-loglevel", "warning", *pace,
+           # extra_hw_frames: without a deeper V4L2 capture pool the paced HW decoder recycles
+           # buffers still in use and hands the encoder torn frames (verified 2026-09-12)
+           *(["-hwaccel", "v4l2request", "-hwaccel_output_format", "drm_prime",
+              "-extra_hw_frames", str(CONFIG["extra_hw_frames"])] if hw else ["-threads", "8"]),
+           *ss, "-i", path, "-map", "0:%d" % v["index"], "-an", "-sn",
+           "-vf", ("hwdownload,format=nv12," if hw else "") + "scale=%d:%d" % (ow, oh),
+           "-pix_fmt", "nv12", "-f", "rawvideo", "-"]
+    gop = str(int(round(fps * 2)))
+    if enc == "x264":
+        # no -tune zerolatency: sessions are not live any more, lookahead/B-frames buy quality per bit
+        vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-b:v", q[2], "-maxrate", q[2],
+                  "-bufsize", "%dk" % (2 * bitrate_bps(q[2]) // 1000), "-g", gop, "-profile:v", "high"]
+        enc_bin = CONFIG["ffmpeg_x264"]
+    else:
+        vcodec = ["-c:v", "h264_rkmpp", "-b:v", q[2], "-g", gop, "-profile:v", "high"]
+        enc_bin = CONFIG["ffmpeg_encode"]
+    # The encoder MUST be single-input: giving the same ffmpeg a second input (the audio demux)
+    # concurrently races the h264_rkmpp async DMA input buffers and corrupts the top macroblock
+    # rows (verified 2026-09-12). Audio and subtitles are muxed downstream.
+    encode = [enc_bin, "-nostdin", "-hide_banner", "-loglevel", "warning",
+              "-f", "rawvideo", "-pix_fmt", "nv12", "-s", "%dx%d" % (ow, oh), "-r", "%.3f" % fps, "-i", "pipe:0",
+              "-map", "0:0", *vcodec, "-f", "mpegts", "-"]
+    return dec, encode
 
 
 def mem_available_kb():
@@ -356,9 +441,10 @@ def mem_available_kb():
 
 # ----------------------------------------------------------------------------- session
 class Session:
-    def __init__(self, kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc="rkmpp"):
+    def __init__(self, kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc="rkmpp", q=None):
         self.id = "%d" % int(time.time() * 1000)
         self.enc = enc
+        self.q = q or quality(None)
         self.kind, self.ident, self.meta, self.probe = kind, ident, meta, probe
         self.offset, self.audio_idx, self.sub_sel, self.mode = offset, audio_idx, sub_sel, mode
         self.dir = os.path.join(CONFIG["run_dir"], self.id)
@@ -371,6 +457,7 @@ class Session:
 
     def info(self):
         produced = 0.0
+        complete = False
         pl = os.path.join(self.dir, "stream_0.m3u8")
         if os.path.exists(pl):
             try:
@@ -380,13 +467,15 @@ class Session:
                 seq = re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", txt)
                 if seq:
                     produced += int(seq.group(1)) * CONFIG["hls_time"]
+                complete = "#EXT-X-ENDLIST" in txt
             except Exception:
                 pass
         alive = (self.chunked and self.producer is not None and self.producer.is_alive()) \
             or any(p.poll() is None for p in self.procs)
         return {"session": self.id, "type": self.kind, "id": self.ident, "title": self.meta.get("title"),
-                "mode": self.mode, "enc": self.enc, "offset": self.offset, "duration": self.probe["duration"],
-                "produced": self.offset + produced, "alive": alive, "error": self.error,
+                "mode": self.mode, "enc": self.enc, "quality": self.q[0], "offset": self.offset,
+                "duration": self.probe["duration"], "produced": self.offset + produced, "complete": complete,
+                "alive": alive, "error": self.error,
                 "ready": os.path.exists(os.path.join(self.dir, "master.m3u8")),
                 "url": "/hls/%s/master.m3u8" % self.id, "uptime": int(time.time() - self.started)}
 
@@ -419,7 +508,7 @@ class SessionManager:
         for d in glob.glob(os.path.join(CONFIG["run_dir"], "*")):
             shutil.rmtree(d, ignore_errors=True)
 
-    def start(self, kind, ident, offset, audio_idx, sub_sel, enc="rkmpp"):
+    def start(self, kind, ident, offset, audio_idx, sub_sel, enc="rkmpp", qname=None):
         meta = item(kind, ident)
         if not meta:
             raise ValueError("unknown item")
@@ -430,9 +519,9 @@ class SessionManager:
         if not probe["video"]:
             raise ValueError("no video stream")
         if audio_idx is None:
-            eng = [a for a in probe["audio"] if a["lang"] in ("eng", "en")]
-            audio_idx = (eng or probe["audio"] or [{"index": None}])[0]["index"]
-        mode = decide(probe, audio_idx, sub_sel)
+            audio_idx = default_audio(probe)
+        q = quality(qname)
+        mode = decide(probe, audio_idx, sub_sel, q)
         with self.lock:
             if self.current:
                 self.current.stop()
@@ -443,7 +532,7 @@ class SessionManager:
                         "duration": probe["duration"], "title": meta["title"], "path": rel}
             if mode == "transcode-sw" and mem_available_kb() < CONFIG["min_mem_available_kb"]:
                 raise RuntimeError("not enough free memory for a software-decode session")
-            s = Session(kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc)
+            s = Session(kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc, q)
             os.makedirs(s.dir)
             self._launch(s, path)
             self.current = s
@@ -472,12 +561,7 @@ class SessionManager:
         audio (CPU only). Decode and encode never overlap, so the encoder never reads a
         starved memory bus -> no top-row smear. Sequential rate is ~6x, paced to ~1x."""
         v = s.probe["video"]
-        width, height = int(v["width"]), int(v["height"])
-        fps = parse_fps(v.get("avg_frame_rate") or v.get("r_frame_rate") or "24")
-        if fps <= 0 or fps > 120:
-            fps = parse_fps(v.get("r_frame_rate") or "24")
-        ow = min(CONFIG["max_width"], width) & ~1
-        oh = int(round(height * ow / width)) & ~1
+        ow, oh, fps = video_geometry(v, s.q[1])
         SEG = float(CONFIG["hls_time"])
         gop = str(int(round(fps * 2)))
         hw = s.mode == "transcode-hw"
@@ -485,15 +569,15 @@ class SessionManager:
         vraw = "/dev/shm/kstream_%s.nv12" % s.id
         vts = "/dev/shm/kstream_%s.ts" % s.id
         s.chunked = True
-        keep = CONFIG["hls_list_size"]
-        paced = CONFIG["pace_realtime"]
+        paced = bool(pace_args())
         lead = CONFIG.get("chunk_lead_seconds", 12)
         dur_total = s.probe["duration"]
 
         def write_playlist(window, seq, final=False):
             lines = ["#EXTM3U", "#EXT-X-VERSION:6",
                      "#EXT-X-TARGETDURATION:%d" % int(round(SEG + 1)),
-                     "#EXT-X-MEDIA-SEQUENCE:%d" % seq, "#EXT-X-INDEPENDENT-SEGMENTS"]
+                     "#EXT-X-MEDIA-SEQUENCE:%d" % seq, "#EXT-X-PLAYLIST-TYPE:EVENT",
+                     "#EXT-X-INDEPENDENT-SEGMENTS"]
             for name, dur in window:
                 lines.append("#EXTINF:%.3f," % dur)
                 lines.append(name)
@@ -505,11 +589,7 @@ class SessionManager:
             os.replace(tmp, os.path.join(s.dir, "stream_0.m3u8"))
 
         def write_master():
-            br = 0
-            try:
-                br = int(str(CONFIG["video_bitrate"]).rstrip("kK")) * 1000 + 128000
-            except ValueError:
-                br = 2600000
+            br = bitrate_bps(s.q[2]) + bitrate_bps(s.q[3])
             with open(os.path.join(s.dir, "master.m3u8"), "w") as f:
                 f.write("#EXTM3U\n#EXT-X-VERSION:6\n"
                         "#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"avc1.64001f,mp4a.40.2\"\n"
@@ -541,7 +621,7 @@ class SessionManager:
                     enc = [CONFIG["ffmpeg_encode"], "-nostdin", "-hide_banner", "-loglevel", "warning",
                            "-f", "rawvideo", "-pix_fmt", "nv12", "-s", "%dx%d" % (ow, oh),
                            "-r", "%.3f" % fps, "-i", vraw, "-map", "0:0",
-                           "-c:v", "h264_rkmpp", "-b:v", CONFIG["video_bitrate"], "-g", gop,
+                           "-c:v", "h264_rkmpp", "-b:v", s.q[2], "-g", gop,
                            "-profile:v", "high", "-f", "mpegts", "-y", vts]
                     if self._run_step(s, enc, logf) != 0:
                         if not s.stop_flag:
@@ -553,7 +633,7 @@ class SessionManager:
                     # -shortest ends the segment when the 4s video (copy) ends
                     a_in = ["-ss", "%.3f" % t0, "-t", "%.3f" % (seglen + 0.3), "-i", path] if s.audio_idx is not None else []
                     a_map = ["-map", "1:%d" % s.audio_idx] if s.audio_idx is not None else []
-                    a_c = ["-c:a", "aac", "-b:a", CONFIG["audio_bitrate"], "-ac", "2", "-shortest"] if s.audio_idx is not None else []
+                    a_c = ["-c:a", "aac", "-b:a", s.q[3], "-ac", "2", "-shortest"] if s.audio_idx is not None else []
                     mux = [CONFIG["ffmpeg_decode"], "-nostdin", "-hide_banner", "-loglevel", "warning",
                            "-i", vts, *a_in, "-map", "0:v:0", *a_map, "-c:v", "copy", *a_c,
                            "-muxpreload", "0", "-muxdelay", "0", "-output_ts_offset", "%.3f" % (seg * SEG),
@@ -565,13 +645,6 @@ class SessionManager:
                     window.append((segname, seglen))
                     if seg == 0:
                         write_master()
-                    if paced and len(window) > keep:
-                        old, _ = window.pop(0)
-                        try:
-                            os.remove(os.path.join(s.dir, old))
-                        except OSError:
-                            pass
-                        seq += 1
                     write_playlist(window, seq)
                     seg += 1
                     # pace: keep ~lead seconds of content ahead of real-time playback
@@ -596,15 +669,9 @@ class SessionManager:
         if s.enc == "rkmpp" and s.mode in ("transcode-hw", "transcode-sw"):
             return self._launch_chunked(s, path)
         v = s.probe["video"]
-        width, height = int(v["width"]), int(v["height"])
-        fps = parse_fps(v.get("avg_frame_rate") or v.get("r_frame_rate") or "24")
-        if fps <= 0 or fps > 120:
-            fps = parse_fps(v.get("r_frame_rate") or "24")
-        ow = min(CONFIG["max_width"], width) & ~1
-        oh = int(round(height * ow / width)) & ~1
         logf = open(os.path.join(s.dir, "ffmpeg.log"), "w")
         ss = ["-ss", "%.3f" % s.offset] if s.offset > 0 else []
-        pace = ["-re"] if CONFIG["pace_realtime"] else []
+        pace = pace_args()
         # audio / subtitle mapping on the encoder side (input 1 = source file, input 2 = external srt)
         enc_inputs = ["-i", path]
         maps = ["-map", "1:%d" % s.audio_idx] if s.audio_idx is not None else ["-an"]
@@ -617,14 +684,13 @@ class SessionManager:
                 maps += ["-map", "1:%d" % int(s.sub_sel)]
             sub_args = ["-c:s", "webvtt"]
             var_map = "v:0,a:0,s:0,sgroup:subs"
-        # paced (default): rolling window. Unpaced: keep the session's segments until stop (the
-        # HW blocks run at full speed, which scored cleanest), still nothing kept after stop.
-        window = (["-hls_list_size", str(CONFIG["hls_list_size"]), "-hls_flags", "delete_segments+independent_segments"]
-                  if CONFIG["pace_realtime"] else ["-hls_list_size", "0", "-hls_flags", "independent_segments"])
-        hls = ["-f", "hls", "-hls_time", str(CONFIG["hls_time"]), *window, "-hls_segment_type", "mpegts",
+        # EVENT playlist: every segment stays until the session stops (a rolling window deleted
+        # the segments a paused viewer had not reached yet, and players then jumped to the live edge)
+        hls = ["-f", "hls", "-hls_time", str(CONFIG["hls_time"]), "-hls_list_size", "0",
+               "-hls_playlist_type", "event", "-hls_flags", "independent_segments", "-hls_segment_type", "mpegts",
                "-master_pl_name", "master.m3u8", "-var_stream_map", var_map,
                "-hls_segment_filename", "seg_%v_%05d.ts", "stream_%v.m3u8"]
-        audio = ["-c:a", "aac", "-b:a", CONFIG["audio_bitrate"], "-ac", "2"] if s.audio_idx is not None else []
+        audio = ["-c:a", "aac", "-b:a", s.q[3], "-ac", "2"] if s.audio_idx is not None else []
         if s.mode == "remux":
             cmd = [CONFIG["ffmpeg_encode"], "-nostdin", "-hide_banner", "-loglevel", "warning", *pace, *ss,
                    "-i", path, *(["-i", str(s.sub_sel)[4:]] if str(s.sub_sel).startswith("ext:") else []),
@@ -632,30 +698,8 @@ class SessionManager:
                    "-c:v", "copy", *audio, *sub_args, *hls]
             s.procs.append(subprocess.Popen(cmd, cwd=s.dir, stdout=logf, stderr=logf))
             return
-        hw = s.mode == "transcode-hw"
-        dec = [CONFIG["ffmpeg_decode"], "-nostdin", "-hide_banner", "-loglevel", "warning", *pace,
-               # extra_hw_frames: without a deeper V4L2 capture pool the paced HW decoder recycles
-               # buffers still in use and hands the encoder torn frames (verified 2026-09-12)
-               *(["-hwaccel", "v4l2request", "-hwaccel_output_format", "drm_prime",
-                  "-extra_hw_frames", str(CONFIG["extra_hw_frames"])] if hw else ["-threads", "8"]),
-               *ss, "-i", path, "-map", "0:%d" % v["index"], "-an", "-sn",
-               "-vf", ("hwdownload,format=nv12," if hw else "") + "scale=%d:%d" % (ow, oh),
-               "-pix_fmt", "nv12", "-f", "rawvideo", "-"]
-        if s.enc == "x264":
-            vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-b:v", CONFIG["video_bitrate"],
-                      "-maxrate", CONFIG["video_bitrate"], "-bufsize", "5M", "-g", str(int(round(fps * 2))), "-profile:v", "high"]
-            enc_bin = CONFIG["ffmpeg_x264"]
-        else:
-            vcodec = ["-c:v", "h264_rkmpp", "-b:v", CONFIG["video_bitrate"], "-g", str(int(round(fps * 2))), "-profile:v", "high"]
-            enc_bin = CONFIG["ffmpeg_encode"]
-        # Stage 2 — VIDEO-ONLY encode to a raw H.264/mpegts pipe. The encoder MUST be single-input:
-        # giving the same ffmpeg a second input (the audio demux) concurrently races the h264_rkmpp
-        # async DMA input buffers and corrupts the top macroblock rows (smear on motion) — verified
-        # 2026-09-12: raw-in clean, video-only encode clean, video+audio encode streaks. Audio and
-        # subtitles are muxed downstream in stage 3, which never drives the HW encoder.
-        enc = [enc_bin, "-nostdin", "-hide_banner", "-loglevel", "warning",
-               "-f", "rawvideo", "-pix_fmt", "nv12", "-s", "%dx%d" % (ow, oh), "-r", "%.3f" % fps, "-i", "pipe:0",
-               "-map", "0:0", *vcodec, "-f", "mpegts", "-"]
+        # Stages 1+2 — decode -> raw NV12 pipe -> video-only encode -> H.264 mpegts pipe
+        dec, enc = transcode_cmds(path, s.probe, s.offset, s.q, s.mode, s.enc, pace)
         # Stage 3 — mux encoded video (copy) + audio (AAC) + subtitles (WebVTT) into HLS. Mainline
         # ffmpeg, no MPP. Input 0 = encoded video from the pipe; input 1 = source file (audio +
         # embedded subs), seeked to the offset so it aligns with the already-offset video.
@@ -698,6 +742,220 @@ class SessionManager:
             if self.current:
                 self.current.stop()
                 self.current = None
+
+
+# ----------------------------------------------------------------------------- downloads
+def display_title(meta):
+    if meta.get("type") == "episode":
+        return "%s S%02dE%02d %s" % (meta.get("show") or "", int(meta.get("season") or 0),
+                                     int(meta.get("episode") or 0), meta.get("title") or "")
+    return "%s (%s)" % (meta["title"], meta["year"]) if meta.get("year") else meta["title"]
+
+
+def attachment(filename):
+    """Content-Disposition for a download: ASCII fallback + RFC 5987 UTF-8 name."""
+    ascii_name = re.sub(r'[^A-Za-z0-9 ._()\-]+', "", filename).strip() or "video"
+    return "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (ascii_name, urllib.parse.quote(filename))
+
+
+class DownloadManager:
+    """Prepared MP4 downloads for offline viewing. Jobs queue up and ONE background worker encodes
+    them at the lowest CPU priority into download_dir (whole file, unpaced, +faststart); nginx
+    serves finished files through the internal /dlcache/ alias. Finished jobs survive a restart via
+    a .json sidecar; old files are pruned by age and by total size."""
+
+    def __init__(self):
+        self.dir = CONFIG["download_dir"]
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.jobs = {}          # name -> job; dict order = queue order
+        self.procs = []
+        self.cancel = None      # name of the running job to abort
+        os.makedirs(self.dir, exist_ok=True)
+        for f in glob.glob(os.path.join(self.dir, "*.part.mp4")) + glob.glob(os.path.join(self.dir, "*.log")):
+            os.remove(f)
+        for side in sorted(glob.glob(os.path.join(self.dir, "*.json")), key=os.path.getmtime):
+            try:
+                job = json.load(open(side))
+            except Exception:
+                job = {}
+            if job.get("name") and os.path.exists(os.path.join(self.dir, job["name"])):
+                self.jobs[job["name"]] = job
+            else:
+                os.remove(side)
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _path(self, name, ext=""):
+        return os.path.join(self.dir, name + ext)
+
+    def add(self, kind, ident, qname, audio_idx, sub_sel):
+        meta = item(kind, ident)
+        if not meta:
+            raise ValueError("unknown item")
+        if not os.path.exists(meta["path"]):
+            raise ValueError("file not available")
+        q = quality(qname)
+        sub = ("_s" + hashlib.sha1(str(sub_sel).encode()).hexdigest()[:6]) if sub_sel else ""
+        name = "%s_%d_%s_a%s%s.mp4" % (kind, ident, q[0], "" if audio_idx is None else int(audio_idx), sub)
+        title = display_title(meta)
+        with self.lock:
+            job = self.jobs.get(name)
+            if job and job["state"] != "error":
+                return dict(job)
+            job = {"name": name, "type": kind, "id": ident, "title": title, "quality": q[0],
+                   "audio": audio_idx, "sub": sub_sel, "state": "queued", "progress": 0.0, "error": None,
+                   "note": "", "created": time.time(), "filename": "%s (%s).mp4" % (title, q[0])}
+            self.jobs.pop(name, None)
+            self.jobs[name] = job
+        self.wake.set()
+        return dict(job)
+
+    def list(self):
+        self._housekeep()
+        out = []
+        with self.lock:
+            for job in self.jobs.values():
+                j = dict(job)
+                if j["state"] == "done":
+                    try:
+                        j["size"] = os.path.getsize(self._path(j["name"]))
+                    except OSError:
+                        j["size"] = 0
+                    j["url"] = "/api/download/file/" + j["name"]
+                out.append(j)
+        return out[::-1]   # newest first
+
+    def get_done(self, name):
+        with self.lock:
+            job = self.jobs.get(name)
+            return dict(job) if job and job["state"] == "done" else None
+
+    def delete(self, name):
+        with self.lock:
+            job = self.jobs.pop(name, None)
+            if job and job["state"] == "running":
+                self.cancel = name
+                for p in self.procs:
+                    if p.poll() is None:
+                        p.kill()
+        if not job:   # only names of known jobs ever touch the disk
+            return False
+        for ext in ("", ".json", ".log"):
+            try:
+                os.remove(self._path(name, ext))
+            except OSError:
+                pass
+        return job is not None
+
+    def _housekeep(self):
+        cutoff = time.time() - CONFIG["download_keep_days"] * 86400
+        with self.lock:
+            done = [j for j in self.jobs.values() if j["state"] == "done"]
+        sizes = {}
+        for j in done:
+            try:
+                sizes[j["name"]] = os.path.getsize(self._path(j["name"]))
+            except OSError:
+                sizes[j["name"]] = 0
+        total = sum(sizes.values())
+        for j in sorted(done, key=lambda j: j.get("finished") or j["created"]):
+            if (j.get("finished") or j["created"]) < cutoff or total > CONFIG["download_max_gb"] * 1e9:
+                log("download prune %s" % j["name"])
+                self.delete(j["name"])
+                total -= sizes[j["name"]]
+
+    def _worker(self):
+        while True:
+            self.wake.wait(60)
+            self.wake.clear()
+            while True:
+                with self.lock:
+                    job = next((j for j in self.jobs.values() if j["state"] == "queued"), None)
+                if not job:
+                    break
+                if mem_available_kb() < CONFIG["min_mem_available_kb"]:
+                    job["note"] = "waiting for free memory"
+                    time.sleep(15)
+                    continue
+                job.update(state="running", note="", progress=0.0)
+                try:
+                    self._run(job)
+                except Exception as e:
+                    job.update(state="error", error=str(e))
+                    log("download %s failed: %r" % (job["name"], e))
+
+    def _run(self, job):
+        meta = item(job["type"], job["id"])
+        path = meta["path"]
+        probe = ffprobe(path)
+        if not probe["video"]:
+            raise ValueError("no video stream")
+        q = quality(job["quality"])
+        audio_idx = job["audio"] if job["audio"] is not None else default_audio(probe)
+        sub_sel = job["sub"]
+        mode = decide(probe, audio_idx, sub_sel, q)
+        dur = probe["duration"] or 1.0
+        tmp = self._path(job["name"][:-4], ".part.mp4")
+        logf = open(self._path(job["name"], ".log"), "w")
+        nice = ["nice", "-n", "19"]
+        ext_sub = str(sub_sel)[4:] if sub_sel and str(sub_sel).startswith("ext:") else None
+        copy = mode in ("direct", "remux")   # already fits this quality: no video re-encode
+        # input 0 = video (the source file, or the encoded pipe); src = index of the source file input
+        inputs = ["-i", path] if copy else ["-i", "pipe:0", "-i", path]
+        src = 0 if copy else 1
+        maps = ["-map", "0:%d" % probe["video"]["index"]] if copy else ["-map", "0:v:0"]
+        if audio_idx is not None:
+            maps += ["-map", "%d:%d" % (src, int(audio_idx))]
+        if sub_sel:
+            if ext_sub:
+                inputs += ["-i", ext_sub]
+                maps += ["-map", "%d:0" % (src + 1)]
+            else:
+                maps += ["-map", "%d:%d" % (src, int(sub_sel))]
+        mux = [*nice, CONFIG["ffmpeg_decode"], "-nostdin", "-hide_banner", "-loglevel", "warning",
+               "-progress", "pipe:1", "-nostats", "-fflags", "+genpts", *inputs, *maps, "-c:v", "copy",
+               *(["-c:a", "aac", "-b:a", q[3], "-ac", "2"] if audio_idx is not None else []),
+               *(["-c:s", "mov_text"] if sub_sel else []),
+               "-movflags", "+faststart", "-f", "mp4", "-y", tmp]
+        with self.lock:
+            self.cancel = None
+            if copy:
+                procs = [subprocess.Popen(mux, stdout=subprocess.PIPE, stderr=logf, text=True)]
+            else:
+                dec, enc = transcode_cmds(path, probe, 0, q, mode, "x264")
+                logf.write("DEC: %s\nENC: %s\n" % (" ".join(dec), " ".join(enc)))
+                p1 = subprocess.Popen(nice + dec, stdout=subprocess.PIPE, stderr=logf)
+                p2 = subprocess.Popen(nice + enc, stdin=p1.stdout, stdout=subprocess.PIPE, stderr=logf)
+                p1.stdout.close()
+                p3 = subprocess.Popen(mux, stdin=p2.stdout, stdout=subprocess.PIPE, stderr=logf, text=True)
+                p2.stdout.close()
+                procs = [p1, p2, p3]
+            self.procs = procs
+        logf.write("MUX: %s\n" % " ".join(mux))
+        logf.flush()
+        for line in procs[-1].stdout:   # -progress key=value lines
+            if line.startswith("out_time_us=") and line[12:].strip().isdigit():
+                job["progress"] = min(0.999, int(line[12:]) / 1e6 / dur)
+        rcs = [p.wait() for p in procs]
+        logf.close()
+        if self.cancel == job["name"]:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return
+        if any(rcs) or not os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise RuntimeError("ffmpeg exit %s (see %s.log)" % (rcs, job["name"]))
+        os.replace(tmp, self._path(job["name"]))
+        os.remove(self._path(job["name"], ".log"))
+        job.update(state="done", progress=1.0, finished=time.time())
+        with open(self._path(job["name"], ".json"), "w") as f:
+            json.dump(job, f)
+        log("download ready %s (%s)" % (job["name"], mode))
 
 
 # ----------------------------------------------------------------------------- resume sync
@@ -773,6 +1031,7 @@ def warm_thumbs():
 
 # ----------------------------------------------------------------------------- http
 SESSIONS = SessionManager()
+DOWNLOADS = DownloadManager()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -824,17 +1083,37 @@ class Handler(BaseHTTPRequestHandler):
                     v = probe.pop("video")
                     probe["video"] = {"codec": v.get("codec_name"), "width": v.get("width"), "height": v.get("height"),
                                       "pix_fmt": v.get("pix_fmt"), "index": v.get("index")} if v else None
-                meta.update({"available": available, "probe": probe})
+                meta.update({"available": available, "probe": probe,
+                             "size": os.path.getsize(meta["path"]) if available else 0,
+                             "qualities": list(CONFIG["qualities"]), "default_quality": quality(None)[0]})
                 return self.send_json(meta)
-            m = re.match(r"^/api/direct/(movie|episode)/(\d+)$", p)
+            m = re.match(r"^/api/(direct|download/original)/(movie|episode)/(\d+)$", p)
             if m:
-                meta = item(m.group(1), int(m.group(2)))
+                meta = item(m.group(2), int(m.group(3)))
                 if not meta or not os.path.exists(meta["path"]):
                     return self.send_json({"error": "not found"}, 404)
                 rel = os.path.relpath(meta["path"], CONFIG["media_root"])
                 self.send_response(200)
-                self.send_header("Content-Type", "video/mp4")
+                if m.group(1) == "direct":
+                    self.send_header("Content-Type", "video/mp4")
+                else:
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", attachment(os.path.basename(meta["path"])))
                 self.send_header("X-Accel-Redirect", "/media/" + urllib.parse.quote(rel))
+                self.end_headers()
+                return
+            if p == "/api/downloads":
+                du = shutil.disk_usage(CONFIG["download_dir"])
+                return self.send_json({"jobs": DOWNLOADS.list(), "free_gb": round(du.free / 1e9, 1)})
+            m = re.match(r"^/api/download/file/([\w.-]+\.mp4)$", p)
+            if m:
+                job = DOWNLOADS.get_done(m.group(1))
+                if not job:
+                    return self.send_json({"error": "not found"}, 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Disposition", attachment(job["filename"]))
+                self.send_header("X-Accel-Redirect", "/dlcache/" + urllib.parse.quote(job["name"]))
                 self.end_headers()
                 return
             m = re.match(r"^/api/thumb/(movie|show|episode)/(\d+)$", p)
@@ -870,8 +1149,13 @@ class Handler(BaseHTTPRequestHandler):
                 res = SESSIONS.start(body["type"], int(body["id"]), float(body.get("offset") or 0),
                                      body.get("audio"), body.get("sub") or None,
                                      (body.get("enc") if (CONFIG.get("allow_hw_encoder") and body.get("enc") in ("x264", "rkmpp"))
-                                      else CONFIG["default_encoder"]))
+                                      else CONFIG["default_encoder"]), body.get("quality"))
                 return self.send_json(res)
+            if p == "/api/download":
+                return self.send_json(DOWNLOADS.add(body["type"], int(body["id"]), body.get("quality"),
+                                                    body.get("audio"), body.get("sub") or None))
+            if p == "/api/download/delete":
+                return self.send_json({"ok": DOWNLOADS.delete(str(body.get("name") or ""))})
             if p == "/api/stop":
                 SESSIONS.stop()
                 return self.send_json({"ok": True})

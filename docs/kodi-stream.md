@@ -23,7 +23,7 @@ untouched. Logout: `/_logout`.
   alias of `/var/media/lacie/Media` for direct play); run dir `/home/pi/kodi-stream-run/<session>/`
   (rolling window, wiped on stop/start); page `/opt/kodi-stream/static/` (index.html + hls.js 1.5.17).
 - Config overrides: `/opt/kodi-stream/config.json` (see `CONFIG` in the script: bitrates,
-  `max_width`, `direct_max_bitrate`, `pace_realtime`, Kodi RPC creds, ffmpeg paths).
+  `qualities`, `direct_max_bitrate`, `pace_readrate`, `download_*`, Kodi RPC creds, ffmpeg paths).
 
 ## How it plays (decision per item, `decide()` in the script)
 | source | mode | who does the work |
@@ -32,8 +32,14 @@ untouched. Logout: `/_logout`.
 | same class but MKV / non-AAC audio / subtitle chosen | `remux` | ffmpeg-rkmpp `-c:v copy`, audio→AAC, HLS |
 | 8-bit H.264/HEVC/VP9/VP8/MPEG-2/AV1 | `transcode-hw` | mainline ffmpeg v4l2request decode → NV12 pipe → `h264_rkmpp` 720p 2.5 Mbps |
 | 10-bit / XviD / anything else | `transcode-sw` | mainline ffmpeg SW decode (8 thr) → same pipe (refused if MemAvailable < 800 MB) |
-Sessions are paced at real time (`-re`), 4 s segments, 8-segment window, ~15 MB on disk. Seek =
-new session at the offset (page keeps absolute time). Text subtitles (embedded or `.srt` beside the
+Sessions are HLS **EVENT** playlists (since 2026-10-31): every segment stays until Stop, encoded as
+fast as the box can (`pace_readrate: 0`; N = `-readrate N`; legacy `pace_realtime: true` = 1x), so a
+paused viewer never loses the place and a slow link can buffer ahead (~1.1 GB/h at 720p in the run
+dir, wiped on stop/start). Before this the window was 8 x 4 s with `-re` + `delete_segments`: a pause
+longer than ~30 s let the unseen segments be deleted and the player jumped to the live edge.
+Seek inside the produced range = plain player seek; outside it = new session at the offset (page keeps
+absolute time). Quality per session: `720p` 2.5 Mbps / `540p` 1.2 Mbps / `360p` 0.6 Mbps
+(`qualities`); a source only plays direct/remux when it already fits the chosen quality. Text subtitles (embedded or `.srt` beside the
 file) → WebVTT rendition in the HLS master (hls.js/Safari render; default track on). Resume: page
 posts every 30 s / on pause / stop / page hide → Kodi JSON-RPC `SetMovieDetails`/`SetEpisodeDetails`
 (playcount +1 at ≥90 %), or the `bookmark` table if Kodi is down.
@@ -191,3 +197,15 @@ fast (logged `thumb fetch budget exceeded`) instead of hanging nginx to a 504; (
 browse grids are cache hits and flaky fanart posters get another chance. Persistently-flaky fanart
 posters fill in on a later request/restart. Cache: `/home/pi/kodi-stream-thumbs` (purge = empty it).
 Open item: box↔assets.fanart.tv is intermittently slow (route/OVH); not blocking (retries + cache).
+
+## Downloads + weak-link playback (2026-10-31)
+- **Pause jump fixed**: EVENT playlists (see "How it plays"); hls.js `startPosition 0`, no live-latency
+  chasing, `maxBufferLength 120`; Safari native starts the EVENT playlist at 0 on `loadedmetadata`.
+  The player bar shows `buffered m:ss · box: +m:ss` (device buffer / how far the box has encoded).
+- **Quality picker** in the detail sheet and the player bar (remembered per browser).
+- **Downloads** (⬇ tab): `Original` = the source file via `X-Accel-Redirect /media/` + attachment
+  (`/api/download/original/<kind>/<id>`, resumable). `Prepare MP4` queues a job (`POST /api/download`):
+  one worker, `nice 19`, same decode → x264 pipe as streaming (video copied when it already fits),
+  AAC, text subs as `mov_text`, `+faststart` → `/home/pi/kodi-stream-dl/` served by nginx
+  `internal /dlcache/`. Jobs: `GET /api/downloads`, `POST /api/download/delete`. Pruned after
+  `download_keep_days` (7) / above `download_max_gb` (30); finished jobs survive restarts (`.json` sidecar).
