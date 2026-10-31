@@ -614,7 +614,15 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
          mouseState: (() => { try { return window.NetCastGetMouseOnOff ? String(window.NetCastGetMouseOnOff()) : '-'; } catch (e) { return 'err'; } })() });
   for (const ev of ['mouseon', 'mouseoff', 'cursorStateChange', 'keyup', 'keypress'])
     document.addEventListener(ev, e2 => diag({ ev, kc: e2.keyCode, vis: e2.detail && e2.detail.visibility }), true);
-  diag({ ev: 'loaded', v: 'tvnav-5' });
+  diag({ ev: 'loaded', v: 'tvnav-6' });
+  // LG NetCast: switch the Magic Remote pointer off so the arrow keys reach the page (docs: NetCast
+  // "Developing Web App", Mouse API). Moving the remote brings the pointer back; nothing happens on
+  // browsers without the API.
+  function pointerOff(why) {
+    if (typeof window.NetCastMouseOff !== 'function') return;
+    try { window.NetCastMouseOff(1); diag({ ev: 'mouseoff-called', why }); } catch (e) { diag({ ev: 'mouseoff-err', m: String(e).slice(0, 120) }); }
+  }
+  pointerOff('load');
 }
 
 // in-player audio / subtitle / quality buttons: same picker on the detail sheet's selects, a change
@@ -755,6 +763,7 @@ document.addEventListener('keydown', e => {
     if (ae === $('#seek') && (dir === 'left' || dir === 'right')) { seekTo(absPos() + (dir === 'right' ? 30 : -15)); return e.preventDefault(); }
   }
   if (K.BACK.includes(k) && !(k === 8 && ae && ae.tagName === 'INPUT')) { if (goBack()) e.preventDefault(); return; }
+  if ((k === 33 || k === 34) && ae && ae.classList.contains('card')) { moveFocus(k === 34 ? 'down' : 'up'); return e.preventDefault(); }
   if (k === 13 && ae && ae.classList.contains('card')) { ae.click(); return e.preventDefault(); }
   if (k === 13 && ae && ae.type === 'checkbox') { ae.click(); return e.preventDefault(); }
   if (!dir) return;
