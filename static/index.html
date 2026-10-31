@@ -60,6 +60,11 @@
   .selbtn::after { content:' ▾'; color:var(--mut); }
   /* on TVs: a coloured dot on the controls the remote's colour buttons trigger */
   html.tv .ck::before { content:''; display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:middle; background:var(--ck); }
+  /* TVs whose remote is a pointer (LG Magic Remote): bigger thumbnails = less pointer travel per title,
+     and the highlight follows the pointer */
+  html.tv .grid { grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:18px; }
+  html.tv .card:hover { outline:3px solid var(--acc); outline-offset:3px; transform:scale(1.04); z-index:1; }
+  html.tv button:hover, html.tv a:hover, html.tv .selbtn:hover, html.tv label:hover { outline:3px solid var(--acc); outline-offset:2px; }
   .ck-r { --ck:#e53935; } .ck-g { --ck:#43a047; } .ck-y { --ck:#fdd835; } .ck-b { --ck:#1e88e5; }
   /* in-player picker (audio / subtitles / quality): big buttons, works with a TV remote's arrows + OK */
   #pmenu { position:absolute; right:14px; bottom:84px; z-index:3; display:none; flex-direction:column; gap:6px;
@@ -227,15 +232,24 @@ async function load(keep) {
 }
 new IntersectionObserver(es => { if (es[0].isIntersecting) nextPage(); }, { rootMargin: '600px' }).observe($('#more'));
 const focusCard = key => { const c = key ? document.querySelector(`.card[data-key="${key}"]`) : document.querySelector('#grid .card'); if (c) focusEl(c); };
+let showKey = null;
+function leaveShow(fromHistory) {
+  if (!showId) return;
+  if (!fromHistory) dropLayer('show');
+  showId = null; load().then(() => focusCard(showKey));
+}
 function openShow(s) {
-  showId = s.id; scrollTo(0, 0); $('#crumb').style.display = 'block'; $('#crumb').innerHTML = `<a href="#" id="back" class="ck ck-b">◀ Shows</a> / ${esc(s.title)}`;
+  if (!showId) pushLayer('show');
+  showKey = 'show' + s.id;
+  showId = s.id; scrollTo(0, 0); $('#crumb').style.display = 'block'; $('#crumb').innerHTML = `<a href="#" id="back">◀ Shows</a> / ${esc(s.title)}`;
   // back to the show list: land on the show you came from
-  $('#back').onclick = e => { e.preventDefault(); showId = null; load().then(() => focusCard('show' + s.id)); };
+  $('#back').onclick = e => { e.preventDefault(); leaveShow(); };
   load().then(() => focusCard());
 }
 $('#q').oninput = () => { clearTimeout(window._t); window._t = setTimeout(() => load(), 300); };
 for (const el of ['#fSort', '#fGenre', '#fUnw']) $(el).onchange = () => { savePrefs(); scrollTo(0, 0); load(); };
 async function setTab(t) {
+  if (showId) dropLayer('show');
   tab = t; showId = null;
   $('#tabM').classList.toggle('on', t === 'movie'); $('#tabS').classList.toggle('on', t === 'show'); $('#tabD').classList.toggle('on', t === 'dl');
   $('#crumb').style.display = 'none';
@@ -303,7 +317,8 @@ let lastCard = null;
 async function openItem(it) {
   lastCard = document.activeElement && document.activeElement.classList.contains('card') ? document.activeElement : null;
   cur = { type: it.type, id: it.id, title: it.type === 'episode' ? `${it.show} S${it.season}E${it.episode} · ${it.title}` : it.title };
-  $('#dTitle').textContent = cur.title; $('#dInfo').textContent = 'Probing…'; $('#detail').classList.add('on');
+  $('#dTitle').textContent = cur.title; $('#dInfo').textContent = 'Probing…'; if (!detailOn()) pushLayer('detail');
+  $('#detail').classList.add('on');
   $('#dDlMsg').textContent = ''; $('#dOrig').style.display = 'none'; $('#dResume').style.display = 'none';
   $('#dPlay').focus({ preventScroll: true });
   const d = await api(`/item/${it.type}/${it.id}`);
@@ -329,11 +344,13 @@ async function openItem(it) {
   syncSel();
   if (d.resume > 0 && document.activeElement === $('#dPlay')) $('#dResume').focus({ preventScroll: true });
 }
-function closeDetail() {
+function closeDetail(fromHistory) {
+  if (!detailOn()) return;
+  if (!fromHistory) dropLayer('detail');
   $('#detail').classList.remove('on');
   if (lastCard && document.contains(lastCard)) focusEl(lastCard);
 }
-$('#dClose').onclick = closeDetail;
+$('#dClose').onclick = () => closeDetail();
 $('#dPlay').onclick = () => startPlay(0);
 $('#dResume').onclick = () => startPlay(cur.meta.resume);
 $('#dPrep').onclick = async () => {
@@ -342,6 +359,29 @@ $('#dPrep').onclick = async () => {
   const r = await post('/download', { type: cur.type, id: cur.id, quality: $('#dQ').value, audio, sub: $('#dSub').value || null });
   $('#dDlMsg').textContent = r.error ? r.error : r.state === 'done' ? 'Ready in the ⬇ tab' : 'Queued, progress in the ⬇ tab';
 };
+
+// ---------------- Back = browser history. A TV remote's Back key (and a phone's back gesture) only
+// ever goes back in history, so every layer we open (episode list, detail sheet, player, picker) is a
+// history entry and popstate closes the top one. When the UI closes a layer itself (Close, Stop, a
+// pick, ...) it removes that entry with history.go(); that popstate is ignored.
+const layers = [];   // mirrors our history entries: 'show' | 'detail' | 'player' | 'pick'
+let quietPops = 0;
+function pushLayer(name) { layers.push(name); history.pushState({ ks: layers.length }, ''); }
+function swapLayer(name) { if (layers.length) layers[layers.length - 1] = name; else pushLayer(name); }
+function dropLayer(name) {
+  const i = layers.lastIndexOf(name);
+  if (i < 0) return;
+  const n = layers.length - i; layers.length = i; quietPops++; history.go(-n);
+}
+window.addEventListener('popstate', () => {
+  if (quietPops > 0) { quietPops--; return; }
+  // close whatever is really on top (self-healing if the bookkeeping and the screen ever disagree)
+  layers.pop();
+  if (menuOpen()) closePicker(true);
+  else if (playerOn()) stopPlay(true);
+  else if (detailOn()) closeDetail(true);
+  else if (showId) leaveShow(true);
+});
 
 // ---------------- player
 // Sessions are EVENT playlists: the box keeps every segment it made until Stop and encodes ahead
@@ -354,6 +394,7 @@ function playBody(at) {
   return { type: cur.type, id: cur.id, offset: at, audio, sub: $('#dSub').value || null, enc: $('#dEnc').value, quality: $('#dQ').value };
 }
 async function startPlay(at) {
+  swapLayer('player');
   $('#detail').classList.remove('on'); $('#player').classList.add('on'); $('#ptitle').textContent = cur.title; $('#msg').textContent = 'Starting…';
   $('#bPlay').focus({ preventScroll: true });
   const res = await post('/play', playBody(at));
@@ -436,8 +477,10 @@ $('#bFwd').onclick = () => seekTo(absPos() + 30);
 $('#bPlay').onclick = () => { if (video.paused) video.play(); else { video.pause(); saveProgress(); } };
 video.onplay = () => $('#bPlay').textContent = '⏸'; video.onpause = () => $('#bPlay').textContent = '▶';
 $('#bFull').onclick = () => { const el = $('#player'); (el.requestFullscreen || el.webkitRequestFullscreen || video.webkitEnterFullscreen || (()=>{})).call(el.requestFullscreen ? el : video); };
-$('#bStop').onclick = stopPlay;
-async function stopPlay() {
+$('#bStop').onclick = () => stopPlay();
+async function stopPlay(fromHistory) {
+  if (!playerOn()) return;
+  if (!fromHistory) dropLayer('player');
   saveProgress(); clearInterval(ticker); if (hls) { hls.destroy(); hls = null; } video.pause(); video.removeAttribute('src'); video.load();
   sess = null; $('#player').classList.remove('on'); await post('/stop', {});
   const key = cur.type + cur.id; await load(!showId); focusCard(key);
@@ -465,6 +508,7 @@ video.addEventListener('play', showBar);
 let pick = null;   // { sel, from }
 function openPicker(sel, title, from, onPick) {
   const m = $('#pmenu'), inPlayer = playerOn();
+  if (!menuOpen()) pushLayer('pick');
   (inPlayer ? $('#player') : document.body).appendChild(m);
   m.classList.toggle('modal', !inPlayer);
   pick = { sel, from };
@@ -485,7 +529,9 @@ function openPicker(sel, title, from, onPick) {
   const c = m.querySelector('button.cur') || m.querySelector('button');
   c.focus(); c.scrollIntoView({ block: 'nearest' });
 }
-function closePicker() {
+function closePicker(fromHistory) {
+  if (!menuOpen()) return;
+  if (!fromHistory) dropLayer('pick');
   $('#pmenu').classList.remove('on');
   if (pick && pick.from) pick.from.focus();
   pick = null; if (playerOn()) showBar();
@@ -495,6 +541,7 @@ document.addEventListener('click', e => {
   if (!menuOpen() || $('#pmenu').contains(e.target) || (pick && pick.from && pick.from.contains(e.target))) return;
   e.preventDefault(); e.stopPropagation(); closePicker();
 }, true);
+const detailOn = () => $('#detail').classList.contains('on');
 
 // every <select> on the page becomes a button that opens the picker; the hidden <select> keeps the
 // value, so filters / play / downloads read it exactly as before
@@ -522,10 +569,21 @@ syncSel();
 if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.test(navigator.userAgent) ||
     new URLSearchParams(location.search).has('tv')) {
   document.documentElement.classList.add('tv');
-  const marks = { r: ['#pSub', '#tabM'], g: ['#pAudio', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dClose'] };
+  const marks = { r: ['#pSub', '#tabM', '#tabS'], y: ['#pQ'] };
   for (const [c, ids] of Object.entries(marks)) ids.forEach(id => $(id).classList.add('ck', 'ck-' + c));
-  [['dSub', 'r'], ['dAudio', 'g'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
+  [['dSub', 'r'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
+  // TEMP diagnostics (TV only): every key and JS error becomes a GET /api/_diag?... that 404s but lands
+  // in the box nginx access log, so we can see what this remote really sends
+  const diag = o => { try { new Image().src = '/api/_diag?' + new URLSearchParams(Object.assign({ t: Date.now() }, o)); } catch (e) {} };
+  window.addEventListener('error', ev => diag({ err: String(ev.message).slice(0, 200), line: ev.lineno }));
+  window.addEventListener('keydown', ev => {
+    const a = document.activeElement;
+    diag({ ev: 'down', kc: ev.keyCode, key: ev.key, code: ev.code, which: ev.which,
+           focus: a ? (a.dataset && a.dataset.key) || a.id || a.tagName : '-', prevented: ev.defaultPrevented });
+  }, false);   // bubble phase on window: runs after our handler, so 'prevented' shows whether we took it
+  window.addEventListener('popstate', () => diag({ ev: 'popstate', layers: layers.join('>') }));
+  diag({ ev: 'loaded', v: 'tvnav-3' });
 }
 
 // in-player audio / subtitle / quality buttons: same picker on the detail sheet's selects, a change
@@ -554,7 +612,6 @@ $('#pmenu').addEventListener('click', e => e.stopPropagation());
 // layer. Focus stays inside the topmost layer: picker > player bar > detail sheet > page.
 const K = { BACK: [27, 8, 461, 10009], PLAY: [415], PAUSE: [19], STOP: [413, 178], PLAYPAUSE: [179, 10252], FF: [417, 228], REW: [412, 227] };
 const DIRS = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
-const detailOn = () => $('#detail').classList.contains('on');
 function navScope() {
   if (menuOpen()) return $('#pmenu');
   if (playerOn()) return $('#pbar');
@@ -605,17 +662,24 @@ function moveFocus(dir) {
   focusEl(best);
 }
 function goBack() {
-  if (menuOpen()) { closePicker(); return true; }
-  if (playerOn()) return false;   // Back in the player: leave it to Stop, don't kill a stream by accident
-  if (detailOn()) { closeDetail(); return true; }
-  if (showId) { $('#back').click(); return true; }
-  return false;
+  if (!layers.length) return false;
+  history.back();   // popstate closes the top layer (picker > player > detail > episode list)
+  return true;
+}
+// "back to the titles" (blue / 416): close everything down to the grid
+function backToTitles() {
+  if (menuOpen()) closePicker();
+  if (playerOn()) return stopPlay();
+  if (detailOn()) return closeDetail();
+  if (showId) return leaveShow();
+  if (tab === 'dl') return setTab('movie').then(() => focusCard());
+  scrollTo(0, 0); focusCard();
 }
 document.addEventListener('keydown', e => {
   const k = e.keyCode, dir = DIRS[k], ae = document.activeElement;
   // the picker owns the keys while open: up/down wrap, page / channel up-down jump 8 rows
   if (menuOpen()) {
-    if (K.BACK.includes(k) || k === 406) { closePicker(); return e.preventDefault(); }
+    if (K.BACK.includes(k) || k === 406 || k === 416) { closePicker(); return e.preventDefault(); }
     const bs = [...$('#pmenu').querySelectorAll('button')], i = bs.indexOf(ae);
     const step = k === 40 ? 1 : k === 38 ? -1 : k === 34 ? 8 : k === 33 ? -8 : 0;
     if (step) {
@@ -626,25 +690,22 @@ document.addEventListener('keydown', e => {
     if (playerOn()) showBar();
     return;
   }
-  // colour buttons: red / green / yellow = subtitles / audio / quality in the player and the detail
-  // sheet; in the library Movies / Shows / Search. Blue (the "four squares" key) is always "back to
-  // the titles": stop the player, close the detail sheet, episodes -> shows, else top of the grid.
-  const color = { 403: 0, 404: 1, 405: 2, 406: 3 }[k];
-  if (color === 3) {
+  // colour buttons. The LG hotel TV only hands red (403) and yellow (405) to web pages (green / blue /
+  // arrows stay with the TV), so those two carry the important jobs:
+  //   red    = subtitles (player, detail)  · library: Movies <-> Shows
+  //   yellow = quality   (player, detail)  · library: search
+  //   green  = audio (player, detail) · library: Shows      (other TVs)
+  //   blue / 416 = back to the titles
+  const color = { 403: 'r', 404: 'g', 405: 'y', 406: 'b', 416: 'b' }[k];
+  if (color === 'b') { e.preventDefault(); backToTitles(); return; }
+  if (color) {
     e.preventDefault();
-    if (playerOn()) stopPlay();
-    else if (detailOn()) closeDetail();
-    else if (showId) $('#back').click();
-    else if (tab === 'dl') setTab('movie').then(() => focusCard());
-    else { scrollTo(0, 0); focusCard(); }
-    return;
-  }
-  if (color !== undefined) {
-    e.preventDefault();
-    if (playerOn()) { showBar(); [$('#pSub'), $('#pAudio'), $('#pQ')][color].click(); }
-    else if (detailOn()) [$('#dSub')._btn, $('#dAudio')._btn, $('#dQ')._btn][color].click();
-    else if (color === 2) focusEl($('#q'));
-    else [$('#tabM'), $('#tabS')][color].click();
+    const i = { r: 0, g: 1, y: 2 }[color];
+    if (playerOn()) { showBar(); [$('#pSub'), $('#pAudio'), $('#pQ')][i].click(); }
+    else if (detailOn()) [$('#dSub')._btn, $('#dAudio')._btn, $('#dQ')._btn][i].click();
+    else if (color === 'y') focusEl($('#q'));
+    else if (color === 'g') setTab('show');
+    else setTab(tab === 'movie' ? 'show' : 'movie');
     return;
   }
   // the remote's own Stop key: stop and go back to the titles (focus lands on the one that played)
