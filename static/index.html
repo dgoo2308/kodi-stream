@@ -73,6 +73,8 @@
   #pmenu.on { display:flex; }
   #pmenu.modal { position:fixed; left:50%; top:50%; right:auto; bottom:auto; transform:translate(-50%,-50%); z-index:40;
                  max-height:70vh; box-shadow:0 0 0 100vmax #0009; }
+  /* anchored next to its trigger (wins over the centred .modal placement) */
+  #pmenu.anchored, #pmenu.modal.anchored { position:fixed; right:auto; bottom:auto; top:auto; transform:none; z-index:40; }
   #pmenu .ttl { color:var(--mut); font-size:13px; padding:0 4px 4px; }
   #pmenu button { text-align:left; font-size:17px; padding:11px 14px; background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; }
   #pmenu button.cur { border-color:var(--acc); color:var(--acc); }
@@ -527,8 +529,22 @@ function openPicker(sel, title, from, onPick) {
     m.appendChild(b);
   }
   m.classList.add('on'); if (inPlayer) showBar();
+  anchorPicker(m, from);
   const c = m.querySelector('button.cur') || m.querySelector('button');
   c.focus(); c.scrollIntoView({ block: 'nearest' });
+}
+// open the list right next to the control that opened it (a TV pointer is still sitting there):
+// above it when there is more room above, else below; clamped inside the screen
+function anchorPicker(m, from) {
+  m.classList.remove('anchored'); m.style.left = m.style.top = m.style.bottom = m.style.maxHeight = '';
+  const r = from && from.getBoundingClientRect();
+  if (!r || !r.width) return;   // no visible trigger: keep the default spot (centred / player corner)
+  m.classList.add('anchored');
+  const above = r.top > innerHeight - r.bottom, room = (above ? r.top : innerHeight - r.bottom) - 16;
+  m.style.maxHeight = Math.max(160, Math.min(room, innerHeight * 0.7)) + 'px';
+  m.style.left = Math.max(8, Math.min(r.left, innerWidth - m.offsetWidth - 8)) + 'px';
+  if (above) m.style.bottom = (innerHeight - r.top + 8) + 'px'; else m.style.top = (r.bottom + 8) + 'px';
+  const c = m.querySelector('button.cur'); if (c) c.scrollIntoView({ block: 'nearest' });
 }
 function closePicker(fromHistory) {
   if (!menuOpen()) return;
@@ -591,7 +607,14 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
            focus: a ? (a.dataset && a.dataset.key) || a.id || a.tagName : '-', prevented: ev.defaultPrevented });
   }, false);   // bubble phase on window: runs after our handler, so 'prevented' shows whether we took it
   window.addEventListener('popstate', () => diag({ ev: 'popstate', layers: layers.join('>') }));
-  diag({ ev: 'loaded', v: 'tvnav-4' });
+  // which TV APIs exist? (NetCast documents NetCastMouseOff() = pointer off -> arrows reach the page)
+  const has = n => typeof window[n];
+  diag({ ev: 'probe', NetCastMouseOff: has('NetCastMouseOff'), NetCastGetMouseOnOff: has('NetCastGetMouseOnOff'),
+         NetCastBack: has('NetCastBack'), PalmSystem: has('PalmSystem'), webOSSystem: has('webOSSystem'), hcap: has('hcap'),
+         mouseState: (() => { try { return window.NetCastGetMouseOnOff ? String(window.NetCastGetMouseOnOff()) : '-'; } catch (e) { return 'err'; } })() });
+  for (const ev of ['mouseon', 'mouseoff', 'cursorStateChange', 'keyup', 'keypress'])
+    document.addEventListener(ev, e2 => diag({ ev, kc: e2.keyCode, vis: e2.detail && e2.detail.visibility }), true);
+  diag({ ev: 'loaded', v: 'tvnav-5' });
 }
 
 // in-player audio / subtitle / quality buttons: same picker on the detail sheet's selects, a change
