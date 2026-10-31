@@ -614,7 +614,7 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
          mouseState: (() => { try { return window.NetCastGetMouseOnOff ? String(window.NetCastGetMouseOnOff()) : '-'; } catch (e) { return 'err'; } })() });
   for (const ev of ['mouseon', 'mouseoff', 'cursorStateChange', 'keyup', 'keypress'])
     document.addEventListener(ev, e2 => diag({ ev, kc: e2.keyCode, vis: e2.detail && e2.detail.visibility }), true);
-  diag({ ev: 'loaded', v: 'tvnav-6' });
+  diag({ ev: 'loaded', v: 'tvnav-7' });
   // LG NetCast: switch the Magic Remote pointer off so the arrow keys reach the page (docs: NetCast
   // "Developing Web App", Mouse API). Moving the remote brings the pointer back; nothing happens on
   // browsers without the API.
@@ -779,6 +779,20 @@ window.addEventListener('pagehide', () => { if ($('#player').classList.contains(
 // device list / phone sign-in only exist behind the VPS login, not on the LAN site
 if (/(^|\.)nellika\.io$/.test(location.hostname)) $('#acct').style.display = '';
 setTab('movie').then(() => { if (document.documentElement.classList.contains('tv')) focusCard(); });
+// TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
+// never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
+// and reload when it changed (never during playback or with a menu open).
+const BUILD = 'tvnav-7';
+async function checkBuild() {
+  if (playerOn() || menuOpen() || detailOn()) return;
+  try {
+    const txt = await fetch('/?build=' + Date.now(), { cache: 'no-store' }).then(r => r.text());
+    const m = txt.match(/const BUILD = '([^']+)'/);
+    if (m && m[1] !== BUILD) location.reload();
+  } catch (e) {}
+}
+setInterval(checkBuild, 120000);
+window.addEventListener('pageshow', ev => { if (ev.persisted) checkBuild(); });
 </script>
 </body>
 </html>
