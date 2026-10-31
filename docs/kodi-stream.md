@@ -209,3 +209,23 @@ Open item: box↔assets.fanart.tv is intermittently slow (route/OVH); not blocki
   AAC, text subs as `mov_text`, `+faststart` → `/home/pi/kodi-stream-dl/` served by nginx
   `internal /dlcache/`. Jobs: `GET /api/downloads`, `POST /api/download/delete`. Pruned after
   `download_keep_days` (7) / above `download_max_gb` (30); finished jobs survive restarts (`.json` sidecar).
+
+## Sign-in v2: passkeys + phone (QR) sign-in for TVs/tablets (2026-10-31)
+VPS service `stream-auth` (`vps/stream-auth.py`, venv `/opt/stream-auth/venv` = python3.11 + `webauthn` +
+`segno`, sqlite `/var/lib/stream-auth/auth.db`; deploy with `vps/deploy.sh`).
+- **Own account, not shared:** stream no longer uses the transmission/torrent-add htpasswd and the vhost
+  dropped its Basic-auth fallback. Account `danny`; stream-only password file `/etc/stream-auth.htpasswd`
+  (fallback only). Old stateless cookies stay valid until expiry and map to `danny`
+  (`STREAM_AUTH_OWNER`); visiting a page upgrades them to a listed session.
+- **Passkeys** (WebAuthn, discoverable, rp id `nellika.io` so later *.nellika.io apps can share them).
+  Bootstrap without a password: `/opt/stream-auth/venv/bin/python /opt/stream-auth/stream-auth.py enroll danny`
+  → one-time 24 h link `/_enroll?t=…`. New stream password: `… stream-auth.py passwd danny` (prints once).
+- **Phone sign-in for a TV / tablet:** `/_login` on a wide screen shows a QR + code (`/_auth/pair/start`,
+  5 min, rate limited per IP); the signed-in phone opens `/_pair?c=CODE`, sees the device + IP, names it
+  and allows it for today / 1 week / long-term (90 d). The screen polls `/_auth/pair/poll` with its secret
+  and gets its own session cookie once (one-time hand-over).
+- **Devices:** `/_devices` (👤 in the player, nellika.io only) lists sessions (kind, IP, last used, expiry)
+  and passkeys, with revoke/remove; type a TV code there too. Every device is a server-side session
+  (only the token hash is stored), so revoke is immediate.
+- Safety: JSON API requires `Content-Type: application/json` + same Origin (CSRF); password login rate
+  limited (10 failures / 15 min / IP); open-redirect guard on `next`.

@@ -1,10 +1,11 @@
 [Unit]
-Description=stream.nellika.io cookie login (form auth -> signed cookie, htpasswd-backed)
+Description=stream.nellika.io sign-in (passkeys, phone pairing for TVs, revocable device sessions)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3.9 /opt/stream-auth/stream-auth.py
+# venv: python3.11 + webauthn + segno (see vps/deploy.sh)
+ExecStart=/opt/stream-auth/venv/bin/python /opt/stream-auth/stream-auth.py
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

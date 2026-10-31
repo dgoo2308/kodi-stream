@@ -18,8 +18,8 @@ iOS-Keychain-friendly cookie login. Companion to [torrent-adder](https://github.
   subtitle pickers, fullscreen, auto-hiding controls; seeking/track-change restart the transcode at the point.
 - **Resume + watched** shared with Kodi (JSON-RPC when Kodi runs, the library DB `bookmark`/`files`
   rows when it does not), both directions.
-- **Access**: reverse-proxied via frp to a VPS; a cookie login form (Keychain-friendly) with HTTP
-  Basic auth as fallback (`vps/`). At home: `http://kodi.local` (avahi mDNS), no login, private
+- **Access**: reverse-proxied via frp to a VPS; sign in with a passkey (Face ID), or scan the QR code on a
+  TV/tablet with your signed-in phone; every device is listed and revocable at `/_devices` (`vps/`). At home: `http://kodi.local` (avahi mDNS), no login, private
   IPv4 ranges only (`nginx-kodi-stream-lan.conf`, a separate server block so the frp target is untouched).
 
 ## Encoder note (important)

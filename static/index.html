@@ -17,6 +17,7 @@
   .filters.hide { display:none; }
   .tabs { margin-left:auto; display:flex; gap:6px; }
   .tabs button { background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; padding:8px 10px; }
+  .tabs .acct { background:#222; border:1px solid #333; border-radius:8px; padding:8px 10px; text-decoration:none; }
   .tabs button.on { background:var(--acc); color:#000; border-color:var(--acc); }
   #more { height:1px; }
   /* phone: tabs + search on row 1, sort/genre/unwatched on row 2 */
@@ -83,7 +84,7 @@
     <select id="fGenre" title="Genre"><option value="">All genres</option></select>
     <label><input type="checkbox" id="fUnw"> Unwatched</label>
   </div>
-  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇</button></div>
+  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇</button><a id="acct" class="acct" href="/_devices" title="My devices / sign in a TV" style="display:none">👤</a></div>
 </header>
 <main><div id="crumb" style="color:var(--mut);margin:0 0 8px;display:none"></div><div id="grid" class="grid"></div><div id="more"></div></main>
 
@@ -398,6 +399,8 @@ $('#pSub').onchange = () => { $('#dSub').value = $('#pSub').value; seekTo(absPos
 $('#pQ').onchange = () => { $('#dQ').value = $('#pQ').value; $('#dQ').onchange(); seekTo(absPos(), true); };
 video.onended = () => { saveProgress(); };
 window.addEventListener('pagehide', () => { if ($('#player').classList.contains('on')) saveProgress(true); });
+// device list / phone sign-in only exist behind the VPS login, not on the LAN site
+if (/(^|\.)nellika\.io$/.test(location.hostname)) $('#acct').style.display = '';
 setTab('movie');
 </script>
 </body>

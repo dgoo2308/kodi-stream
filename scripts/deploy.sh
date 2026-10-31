@@ -14,7 +14,11 @@ check() {
 }
 
 echo "== before"; check
-echo "== active session (a restart ends it):"; "${SSH[@]}" 'curl -s http://127.0.0.1:8090/api/session; echo'
+SESSION=$("${SSH[@]}" 'curl -s http://127.0.0.1:8090/api/session')
+echo "== active session: $SESSION"
+if [[ "$SESSION" != *'"session": null'* && "${FORCE:-}" != 1 ]]; then
+  echo "Someone is watching (a restart would end the stream). Re-run later, or FORCE=1 $0"; exit 2
+fi
 
 "${SCP[@]}" stream-api.py static/index.html nginx-kodi-stream.conf nginx-kodi-stream-lan.conf root@127.0.0.1:/root/
 "${SSH[@]}" 'set -e
