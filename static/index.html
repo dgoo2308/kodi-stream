@@ -400,6 +400,7 @@ window.addEventListener('popstate', () => {
   if (!layers.length && !menuOpen() && !playerOn() && !detailOn() && !showId && window.ksAtGuard) return ksAtGuard();
   // close whatever is really on top (self-healing if the bookkeeping and the screen ever disagree)
   layers.pop();
+  if (window.ksSelectMode) ksSelectMode();
   if (menuOpen()) closePicker(true);
   else if (playerOn()) stopPlay(true);
   else if (detailOn()) closeDetail(true);
@@ -653,10 +654,9 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
     if (!wheelMode) return;
     const a = document.activeElement;
     if (!a || a === document.body || a.contains(ev.target)) return;
-    if (!(a.classList.contains('card') || a.closest('#pmenu'))) return;
+    if (!a.matches('.card, button, a[href], input[type=checkbox], .selbtn')) return;
     ev.preventDefault(); ev.stopPropagation();
-    setWheelMode(false);
-    a.click();
+    a.click();   // stay in key mode: the next OK again presses what is highlighted
   }, true);
   // Back on the main screen would leave the app: keep one guard entry in history and ask for a second Back
   history.pushState({ ksGuard: 1 }, '');
@@ -780,6 +780,9 @@ function backToTitles() {
 }
 document.addEventListener('keydown', e => {
   const k = e.keyCode, dir = DIRS[k], ae = document.activeElement;
+  // TV: any remote key means "keys are in charge": OK then presses the highlighted control, not the
+  // spot where the (arrow-driven) cursor happens to be. Typing in the search box is left alone.
+  if (window.ksSelectMode && !(ae && ae.tagName === 'INPUT' && ae.type === 'search')) ksSelectMode();
   // the picker owns the keys while open: up/down wrap, page / channel up-down jump 8 rows
   if (menuOpen()) {
     if (K.BACK.includes(k) || k === 406 || k === 416) { closePicker(); return e.preventDefault(); }
@@ -866,7 +869,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-15';
+const BUILD = 'tvnav-16';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
