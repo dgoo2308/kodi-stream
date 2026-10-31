@@ -65,6 +65,7 @@
   html.tv .grid { grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:18px; }
   html.tv .card:hover { outline:3px solid var(--acc); outline-offset:3px; transform:scale(1.04); z-index:1; }
   html.tv button:hover, html.tv a:hover, html.tv .selbtn:hover, html.tv label:hover { outline:3px solid var(--acc); outline-offset:2px; }
+  #tvtip { background:#1d2a38; color:#cfe3ff; font-size:15px; padding:8px 14px; }
   .ck-r { --ck:#e53935; } .ck-g { --ck:#43a047; } .ck-y { --ck:#fdd835; } .ck-b { --ck:#1e88e5; }
   /* in-player picker (audio / subtitles / quality): big buttons, works with a TV remote's arrows + OK */
   #pmenu { position:absolute; right:14px; bottom:84px; z-index:3; display:none; flex-direction:column; gap:6px;
@@ -117,6 +118,7 @@
   </div>
   <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇</button><a id="acct" class="acct" href="/_devices" title="My devices / sign in a TV" style="display:none">👤</a></div>
 </header>
+<div id="tvtip" style="display:none"></div>
 <main><div id="crumb" style="color:var(--mut);margin:0 0 8px;display:none"></div><div id="grid" class="grid"></div><div id="more"></div></main>
 
 <div id="detail">
@@ -380,6 +382,7 @@ window.addEventListener('popstate', () => {
   if (quietPops > 0) { quietPops--; return; }
   // close whatever is really on top (self-healing if the bookkeeping and the screen ever disagree)
   layers.pop();
+  if (window.showTvTip) showTvTip();   // a browser Back (not ours): on TVs the remote keys are off until a click
   if (menuOpen()) closePicker(true);
   else if (playerOn()) stopPlay(true);
   else if (detailOn()) closeDetail(true);
@@ -593,36 +596,29 @@ if (/SmartTV|SMART-TV|Web0S|webOS|NetCast|Tizen|BRAVIA|AFT|CrKey|Android TV/i.te
     const el = ev.target.closest && ev.target.closest('.card, button, a[href], input, .selbtn');
     if (el && el !== document.activeElement && !el.closest('#player.hidebar')) el.focus({ preventScroll: true });
   });
-  const marks = { r: ['#pSub', '#tabM', '#tabS'], y: ['#pQ'] };
+  const marks = { r: ['#pSub', '#tabM', '#tabS'], y: ['#pQ'], b: ['#bStop', '#dClose'] };
   for (const [c, ids] of Object.entries(marks)) ids.forEach(id => $(id).classList.add('ck', 'ck-' + c));
   [['dSub', 'r'], ['dQ', 'y']].forEach(([id, c]) => $('#' + id)._btn.classList.add('ck', 'ck-' + c));
   $('#q').placeholder = 'Search… (yellow)';
-  // TEMP diagnostics (TV only): every key and JS error becomes a GET /api/_diag?... that 404s but lands
-  // in the box nginx access log, so we can see what this remote really sends
-  const diag = o => { try { new Image().src = '/api/_diag?' + new URLSearchParams(Object.assign({ t: Date.now() }, o)); } catch (e) {} };
-  window.addEventListener('error', ev => diag({ err: String(ev.message).slice(0, 200), line: ev.lineno }));
-  window.addEventListener('keydown', ev => {
-    const a = document.activeElement;
-    diag({ ev: 'down', kc: ev.keyCode, key: ev.key, code: ev.code, which: ev.which,
-           focus: a ? (a.dataset && a.dataset.key) || a.id || a.tagName : '-', prevented: ev.defaultPrevented });
-  }, false);   // bubble phase on window: runs after our handler, so 'prevented' shows whether we took it
-  window.addEventListener('popstate', () => diag({ ev: 'popstate', layers: layers.join('>') }));
-  // which TV APIs exist? (NetCast documents NetCastMouseOff() = pointer off -> arrows reach the page)
-  const has = n => typeof window[n];
-  diag({ ev: 'probe', NetCastMouseOff: has('NetCastMouseOff'), NetCastGetMouseOnOff: has('NetCastGetMouseOnOff'),
-         NetCastBack: has('NetCastBack'), PalmSystem: has('PalmSystem'), webOSSystem: has('webOSSystem'), hcap: has('hcap'),
-         mouseState: (() => { try { return window.NetCastGetMouseOnOff ? String(window.NetCastGetMouseOnOff()) : '-'; } catch (e) { return 'err'; } })() });
-  for (const ev of ['mouseon', 'mouseoff', 'cursorStateChange', 'keyup', 'keypress'])
-    document.addEventListener(ev, e2 => diag({ ev, kc: e2.keyCode, vis: e2.detail && e2.detail.visibility }), true);
-  diag({ ev: 'loaded', v: 'tvnav-7' });
-  // LG NetCast: switch the Magic Remote pointer off so the arrow keys reach the page (docs: NetCast
-  // "Developing Web App", Mouse API). Moving the remote brings the pointer back; nothing happens on
-  // browsers without the API.
-  function pointerOff(why) {
-    if (typeof window.NetCastMouseOff !== 'function') return;
-    try { window.NetCastMouseOff(1); diag({ ev: 'mouseoff-called', why }); } catch (e) { diag({ ev: 'mouseoff-err', m: String(e).slice(0, 120) }); }
-  }
-  pointerOff('load');
+  // the TV keeps keyboard focus in its own address bar until the first click into the page: say so
+  // (the TV's own Back key does the same: it returns focus to the address bar, while blue closes screens
+  // from inside the page and keeps it), so say so on load and again after a TV Back
+  const tip = $('#tvtip');
+  tip.innerHTML = 'Click once on the page, then the remote keys work: <b style="color:#ff6b6b">●</b> Movies ⇄ Shows · ' +
+    '<b style="color:#fdd835">●</b> search · <b style="color:#64b5f6">●</b> close / back. ' +
+    'Close screens with <b style="color:#64b5f6">●</b> blue: the TV\'s Back key switches the remote keys off until the next click.';
+  const hideTip = () => { tip.style.display = 'none'; };
+  window.showTvTip = () => {
+    tip.style.display = '';
+    document.addEventListener('click', hideTip, { once: true, capture: true });
+    document.addEventListener('keydown', hideTip, { once: true, capture: true });
+  };
+  showTvTip();
+  // What this LG hotel TV (NetCast UA, Chromium 87) does, measured with a key log on 2026-10-31:
+  // arrows never reach the page (they only move the Magic Remote pointer; none of LG's page APIs such as
+  // NetCastMouseOff / PalmSystem / webOSSystem / hcap exist to switch it off), Back only navigates
+  // history (handled via popstate), and red / yellow / blue arrive only once the page has keyboard focus,
+  // i.e. after the first click into it. So on TVs the page is pointer-first.
 }
 
 // in-player audio / subtitle / quality buttons: same picker on the detail sheet's selects, a change
@@ -782,7 +778,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-7';
+const BUILD = 'tvnav-10';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {

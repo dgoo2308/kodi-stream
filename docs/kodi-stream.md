@@ -243,3 +243,17 @@ VPS service `stream-auth` (`vps/stream-auth.py`, venv `/opt/stream-auth/venv` = 
   picker / detail sheet, episodes -> shows, Downloads -> Movies, else top of the grid. The remote's Stop key
   (413) stops too; focus lands on the title that played. TVs show a coloured dot on those controls (UA
   sniff, `?tv=1` forces it).
+
+### What the LG hotel TV browser actually does (measured 2026-10-31 with a key log to the access log)
+UA `Mozilla/5.0 (Linux; NetCast; U) ... Chrome/87.0.3945.79 ... SmartTV/10.0 Colt/2.0`.
+- **Arrows never reach the page**: they only move the Magic Remote pointer. None of LG's page APIs to
+  switch the pointer off exist (`NetCastMouseOff`, `NetCastGetMouseOnOff`, `PalmSystem`, `webOSSystem`,
+  `hcap` all undefined), so D-pad / thumbnail-jumping is impossible in this browser (only packaged webOS /
+  Pro:Centric apps get it). The page is therefore pointer-first on TVs: bigger thumbnails, hover = focus,
+  pickers open at the control that opened them.
+- **Colour keys** red 403 / yellow 405 / blue 406 (and 416) arrive **only while the page has keyboard
+  focus**, i.e. after the first click into it. A fresh load leaves focus in the TV's address bar.
+- **The TV's Back key** only navigates history (handled: every layer is a history entry, popstate closes
+  the top one) but it also takes keyboard focus away again. Blue closes layers from inside the page and
+  keeps focus, so the TV tip says: close with blue, click once after Back.
+- TV pages reload themselves when a new `BUILD` is deployed (they otherwise run a cached copy for hours).
