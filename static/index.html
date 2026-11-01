@@ -447,6 +447,9 @@ function playBody(at) {
   return { type: cur.type, id: cur.id, offset: at, audio, sub: $('#dSub').value || null, enc: $('#dEnc').value, quality: $('#dQ').value, client: CLIENT };
 }
 async function startPlay(at) {
+  // an old page with a new box behaves half-broken (it happened with the subtitle change): before
+  // playing, make sure this page is the deployed build, reload it if not
+  if (await checkBuild(true)) return;
   swapLayer('player');
   $('#detail').classList.remove('on'); $('#player').classList.add('on'); $('#ptitle').textContent = cur.title; $('#msg').textContent = 'Starting…';
   $('#bPlay').focus({ preventScroll: true });
@@ -951,14 +954,15 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'subs-1';
-async function checkBuild() {
-  if (playerOn() || menuOpen() || detailOn()) return;
+const BUILD = 'subs-2';
+async function checkBuild(beforePlay) {
+  if (!beforePlay && (playerOn() || menuOpen() || detailOn())) return false;
   try {
     const txt = await fetch('/?build=' + Date.now(), { cache: 'no-store' }).then(r => r.text());
     const m = txt.match(/const BUILD = '([^']+)'/);
-    if (m && m[1] !== BUILD) location.reload();
+    if (m && m[1] !== BUILD) { location.reload(); return true; }
   } catch (e) {}
+  return false;
 }
 setInterval(checkBuild, 120000);
 window.addEventListener('pageshow', ev => { if (ev.persisted) checkBuild(); });
