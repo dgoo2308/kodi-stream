@@ -420,10 +420,25 @@ window.addEventListener('popstate', () => {
 // of playback, so pausing never loses the place and seeks inside the produced range need no restart.
 const video = $('#video'); let hls = null, offset = 0, duration = 0, mode = '', ticker = null, lastSave = 0, sess = null, sessAt = 0;
 function absPos() { return offset + (video.currentTime || 0); }
+// every browser has its own stream on the box (several devices can watch at once): this id ties
+// play / stop / polling to this device's stream only
+const CLIENT = (() => {
+  let c = '';
+  try { c = localStorage.getItem('ks.client') || ''; } catch (e) {}
+  if (!c) { c = Math.random().toString(36).slice(2) + Date.now().toString(36); try { localStorage.setItem('ks.client', c); } catch (e) {} }
+  return c;
+})();
+let sessEnded = false;
+function streamEnded(reason) {
+  sessEnded = true;
+  if (hls) hls.stopLoad();
+  video.pause();
+  $('#msg').textContent = 'Stopped: ' + reason;
+}
 function playBody(at) {
   const so = $('#dSub').selectedOptions[0]; if (so && so.value) rememberSub(so.dataset.lang);
   const audio = $('#dAudio').value === '' ? null : Number($('#dAudio').value);
-  return { type: cur.type, id: cur.id, offset: at, audio, sub: $('#dSub').value || null, enc: $('#dEnc').value, quality: $('#dQ').value };
+  return { type: cur.type, id: cur.id, offset: at, audio, sub: $('#dSub').value || null, enc: $('#dEnc').value, quality: $('#dQ').value, client: CLIENT };
 }
 async function startPlay(at) {
   swapLayer('player');
@@ -439,6 +454,8 @@ async function startPlay(at) {
 }
 function attach(url, at) {
   if (hls) { hls.destroy(); hls = null; }
+  sessEnded = false;
+  const sid = (url.match(/\/hls\/([^/]+)\//) || [])[1];
   if (mode === 'direct') { video.src = url; video.currentTime = at || 0; video.play().catch(()=>{}); return; }
   const start = () => {
     if (!(window.Hls && Hls.isSupported())) {  // iOS Safari: no MSE, native HLS
@@ -456,11 +473,11 @@ function attach(url, at) {
                     maxBufferSize: 200 * 1000 * 1000, enableWorker: true });
     hls.loadSource(url); hls.attachMedia(video);
     hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(()=>{}); if (hls.subtitleTracks.length) hls.subtitleTrack = 0; });
-    hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) { $('#msg').textContent = 'stream error: ' + d.type; if (d.type === 'networkError') setTimeout(() => hls && hls.startLoad(), 1500); } });
+    hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal && !sessEnded) { $('#msg').textContent = 'stream error: ' + d.type; if (d.type === 'networkError') setTimeout(() => hls && hls.startLoad(), 1500); } });
   };
   // wait for the master playlist to exist
   (async function poll(n) {
-    const s = await api('/session');
+    const s = await api('/session' + (sid ? '?id=' + sid : ''));
     if (s.ready) { sess = s; sessAt = Date.now(); return start(); }
     if (!s.alive) { $('#msg').textContent = 'encoder stopped: ' + (s.error || 'see log'); return; }
     if (n < 40) setTimeout(() => poll(n+1), 500); else $('#msg').textContent = 'timeout waiting for stream';
@@ -478,7 +495,12 @@ function tick() {
   if (Date.now() - lastSave > 30000 && !video.paused) saveProgress();
   if (mode !== 'direct' && sess && sess.session && Date.now() - sessAt > 5000) {
     sessAt = Date.now();
-    api('/session').then(s => { if (sess && s.session === sess.session) sess = s; }).catch(() => {});
+    const id = sess.session;
+    api('/session?id=' + id).then(s => {
+      if (!sess || sess.session !== id) return;
+      if (s.session === id) sess = s;
+      else if (s.ended && !sessEnded) streamEnded(s.ended);   // e.g. another device took the slot
+    }).catch(() => {});
   }
   // how far ahead this device has buffered, and how far the box has encoded
   const made = mode !== 'direct' && sess && sess.produced != null
@@ -514,7 +536,8 @@ async function stopPlay(fromHistory) {
   if (!playerOn()) return;
   if (!fromHistory) dropLayer('player');
   saveProgress(); clearInterval(ticker); if (hls) { hls.destroy(); hls = null; } video.pause(); video.removeAttribute('src'); video.load();
-  sess = null; $('#player').classList.remove('on'); await post('/stop', {});
+  const sid = sess && sess.session;
+  sess = null; $('#player').classList.remove('on'); await post('/stop', { session: sid, client: CLIENT });
   const key = cur.type + cur.id; await load(!showId); focusCard(key);
 }
 
@@ -893,7 +916,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'tvnav-21';
+const BUILD = 'ms-1';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {

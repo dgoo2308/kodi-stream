@@ -50,6 +50,10 @@ CONFIG = {
     # the old pace_realtime flag (True = 1x).
     "pace_readrate": None,
     "pace_realtime": False,
+    # parallel streams (one per device): beyond this the device that has been quiet longest is stopped;
+    # a stream nobody polled for session_idle_s (tab closed, phone put away) is stopped as well
+    "max_sessions": 2,
+    "session_idle_s": 1800,
     # selectable stream/download quality: name -> [max width, video bitrate, audio bitrate]
     "qualities": {"720p": [1280, "2500k", "128k"], "540p": [960, "1200k", "96k"], "360p": [640, "600k", "64k"]},
     "default_quality": "720p",
@@ -440,9 +444,15 @@ def mem_available_kb():
 
 
 # ----------------------------------------------------------------------------- session
+_SESSION_SEQ = [0]
+
+
 class Session:
-    def __init__(self, kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc="rkmpp", q=None):
-        self.id = "%d" % int(time.time() * 1000)
+    def __init__(self, kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc="rkmpp", q=None, client=None):
+        _SESSION_SEQ[0] += 1
+        self.id = "%d%02d" % (int(time.time() * 1000), _SESSION_SEQ[0] % 100)
+        self.client = client          # the browser that owns this stream (one stream per device)
+        self.last_seen = time.time()  # last poll from that browser
         self.enc = enc
         self.q = q or quality(None)
         self.kind, self.ident, self.meta, self.probe = kind, ident, meta, probe
@@ -501,14 +511,28 @@ class Session:
 
 
 class SessionManager:
+    """Streams, one per device (browser), at most max_sessions at a time. A device that starts or seeks
+    replaces its own stream; a new device beyond the limit stops the stream that has been quiet longest
+    (that device is told why). Streams nobody polls for session_idle_s are reaped."""
     def __init__(self):
         self.lock = threading.Lock()
-        self.current = None
+        self.sessions = {}    # id -> Session
+        self.ended = {}       # id -> reason, so a device can say why its stream is gone
         os.makedirs(CONFIG["run_dir"], exist_ok=True)
         for d in glob.glob(os.path.join(CONFIG["run_dir"], "*")):
             shutil.rmtree(d, ignore_errors=True)
+        threading.Thread(target=self._reaper, daemon=True).start()
 
-    def start(self, kind, ident, offset, audio_idx, sub_sel, enc="rkmpp", qname=None):
+    def _end(self, sid, reason):
+        s = self.sessions.pop(sid, None)
+        if s:
+            s.stop()
+            self.ended[sid] = reason
+            while len(self.ended) > 50:
+                self.ended.pop(next(iter(self.ended)))
+            log("session %s ended: %s" % (sid, reason))
+
+    def start(self, kind, ident, offset, audio_idx, sub_sel, enc="rkmpp", qname=None, client=None):
         meta = item(kind, ident)
         if not meta:
             raise ValueError("unknown item")
@@ -523,20 +547,32 @@ class SessionManager:
         q = quality(qname)
         mode = decide(probe, audio_idx, sub_sel, q)
         with self.lock:
-            if self.current:
-                self.current.stop()
-                self.current = None
+            # this device's previous stream (seek / track change / next title) makes way first
+            for sid, old in list(self.sessions.items()):
+                if client is None or old.client == client:
+                    self._end(sid, "replaced on the same device")
             if mode == "direct":
                 rel = os.path.relpath(path, CONFIG["media_root"])
                 return {"mode": "direct", "url": "/api/direct/%s/%s" % (kind, ident), "offset": 0,
                         "duration": probe["duration"], "title": meta["title"], "path": rel}
+            while len(self.sessions) >= max(1, int(CONFIG["max_sessions"])):
+                sid = min(self.sessions, key=lambda k: self.sessions[k].last_seen)
+                self._end(sid, "another device started a stream (limit %d at a time)" % CONFIG["max_sessions"])
             if mode == "transcode-sw" and mem_available_kb() < CONFIG["min_mem_available_kb"]:
                 raise RuntimeError("not enough free memory for a software-decode session")
-            s = Session(kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc, q)
+            s = Session(kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc, q, client)
             os.makedirs(s.dir)
             self._launch(s, path)
-            self.current = s
+            self.sessions[s.id] = s
             return s.info()
+
+    def _reaper(self):
+        while True:
+            time.sleep(60)
+            with self.lock:
+                cutoff = time.time() - CONFIG["session_idle_s"]
+                for sid in [k for k, v in self.sessions.items() if v.last_seen < cutoff]:
+                    self._end(sid, "idle (no player polled it)")
 
     def _run_step(self, s, cmd, logf):
         """Run one ffmpeg step to completion, tracking it so stop() can kill it."""
@@ -733,15 +769,33 @@ class SessionManager:
         p2.stdout.close()
         s.procs += [p1, p2, p3] + ([tee] if tee else [])
 
-    def status(self):
+    def status(self, sid=None):
+        """One stream (and mark its device as still there), or without an id the newest one."""
         with self.lock:
-            return self.current.info() if self.current else {"session": None}
+            if sid:
+                s = self.sessions.get(sid)
+                if not s:
+                    return {"session": None, "ended": self.ended.get(sid, "unknown stream")}
+                s.last_seen = time.time()
+                return s.info()
+            if not self.sessions:
+                return {"session": None}
+            s = self.sessions[max(self.sessions, key=lambda k: self.sessions[k].started)]
+            s.last_seen = time.time()   # pages from before per-device sessions poll without an id
+            return s.info()
 
-    def stop(self):
+    def all(self):
         with self.lock:
-            if self.current:
-                self.current.stop()
-                self.current = None
+            return [s.info() for s in self.sessions.values()]
+
+    def stop(self, sid=None, client=None):
+        """Stop one stream (by id), or all of one device; without either: the newest stream."""
+        with self.lock:
+            ids = [sid] if sid else [k for k, v in self.sessions.items() if client and v.client == client]
+            if not ids and not sid and not client and self.sessions:
+                ids = [max(self.sessions, key=lambda k: self.sessions[k].started)]
+            for k in ids:
+                self._end(k, "stopped")
 
 
 # ----------------------------------------------------------------------------- downloads
@@ -1060,6 +1114,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if p == "/api/health":
                 return self.send_json({"ok": True, "db": os.path.basename(db_path()), "session": SESSIONS.status(),
+                                       "sessions": SESSIONS.all(),
                                        "mem_available_kb": mem_available_kb()})
             if p in ("/api/movies", "/api/shows"):
                 arg = lambda k, d="": q.get(k, [d])[0]
@@ -1135,7 +1190,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             if p == "/api/session":
-                return self.send_json(SESSIONS.status())
+                return self.send_json(SESSIONS.status(q.get("id", [""])[0] or None))
             return self.send_json({"error": "not found"}, 404)
         except Exception as e:
             log("GET %s failed: %r" % (p, e))
@@ -1149,7 +1204,8 @@ class Handler(BaseHTTPRequestHandler):
                 res = SESSIONS.start(body["type"], int(body["id"]), float(body.get("offset") or 0),
                                      body.get("audio"), body.get("sub") or None,
                                      (body.get("enc") if (CONFIG.get("allow_hw_encoder") and body.get("enc") in ("x264", "rkmpp"))
-                                      else CONFIG["default_encoder"]), body.get("quality"))
+                                      else CONFIG["default_encoder"]), body.get("quality"),
+                                     str(body.get("client") or "")[:64] or None)
                 return self.send_json(res)
             if p == "/api/download":
                 return self.send_json(DOWNLOADS.add(body["type"], int(body["id"]), body.get("quality"),
@@ -1157,7 +1213,7 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/download/delete":
                 return self.send_json({"ok": DOWNLOADS.delete(str(body.get("name") or ""))})
             if p == "/api/stop":
-                SESSIONS.stop()
+                SESSIONS.stop(str(body.get("session") or "") or None, str(body.get("client") or "")[:64] or None)
                 return self.send_json({"ok": True})
             if p == "/api/progress":
                 return self.send_json(save_progress(body["type"], int(body["id"]),

@@ -273,3 +273,13 @@ UA `Mozilla/5.0 (Linux; NetCast; U) ... Chrome/87.0.3945.79 ... SmartTV/10.0 Col
   resume point shows "Resume m:ss / Play from start" straight away.
 - Colours: red Movies / subtitles, green Shows / audio, yellow search / quality, blue close / stop;
   Back closes the top layer (twice on the main screen to leave).
+
+## Several devices at once (2026-11-01)
+Started on the tablet while the phone was playing -> the phone got "stream error": the service ran ONE
+session and every /api/play stopped it. Now `SessionManager` keeps one stream per device (browser id
+`client`, kept in localStorage `ks.client`), up to `max_sessions` (2) at a time. A device that seeks or
+switches tracks replaces only its own stream; a new device beyond the limit stops the stream polled
+least recently, and that player shows "Stopped: another device started a stream". `/api/session?id=`
+polls (and keeps alive) one stream; streams not polled for `session_idle_s` (30 min) are reaped;
+`/api/stop {session, client}` stops only your own. Pages without a client id behave as before (single
+stream). `/api/health` lists all sessions. Two parallel 720p encodes: load ~3.7 on 8 cores, ~380 MB.
