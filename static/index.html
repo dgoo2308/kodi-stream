@@ -18,6 +18,8 @@
   .tabs { margin-left:auto; display:flex; gap:6px; }
   .tabs button { background:#222; color:var(--fg); border:1px solid #333; border-radius:8px; padding:8px 10px; }
   .tabs .acct { background:#222; border:1px solid #333; border-radius:8px; padding:8px 10px; text-decoration:none; }
+  .tabs .lbl { }
+  @media (max-width: 640px) { .tabs .lbl { display:none; } }
   .tabs button.on { background:var(--acc); color:#000; border-color:var(--acc); }
   #more { height:1px; }
   /* phone: tabs + search on row 1, sort/genre/unwatched on row 2 */
@@ -127,7 +129,7 @@
     <select id="fGenre" title="Genre"><option value="">All genres</option></select>
     <label><input type="checkbox" id="fUnw"> Unwatched</label>
   </div>
-  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇</button><a id="acct" class="acct" href="/_devices" title="My devices / sign in a TV" style="display:none">👤</a></div>
+  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇<span class="lbl"> Downloads</span></button><a id="acct" class="acct" href="/_devices" title="My devices / sign in a TV" style="display:none">👤</a></div>
 </header>
 <div id="tvtip" style="display:none"></div>
 <div id="tvstart" style="display:none"><div>Press <b>OK</b> to start</div><small>then ⏪ ⏩ select · OK / ▶ opens · Back closes</small></div>
@@ -149,8 +151,8 @@
     <select id="dStart" style="display:none"></select>
   </div>
   <div class="row">
-    <button id="dPrep" title="Encode a phone-friendly MP4 at the chosen quality, then save it from the ⬇ tab">⬇ Prepare MP4</button>
-    <a id="dOrig" class="btn" href="#" style="display:none">⬇ Original</a>
+    <button id="dPrep" title="Prepare a phone-friendly MP4 of this title at the chosen quality; it appears under Downloads with a Save link">⬇ Download</button>
+    <a id="dOrig" class="btn" href="#" style="display:none" title="The original file as it is on the box (large)">⬇ Original file</a>
     <span class="info" id="dDlMsg"></span>
   </div>
 </div>
@@ -289,7 +291,7 @@ async function loadDownloads() {
   if (tab !== 'dl') return;
   const grid = $('#grid'); grid.innerHTML = '';
   const box = document.createElement('div'); box.className = 'dl';
-  box.innerHTML = `<div class="info" style="color:var(--mut)">Prepared MP4s stay on the box for a week. Pick a title, choose a quality, then “Prepare MP4”.` +
+  box.innerHTML = `<div class="info" style="color:var(--mut)">Open a title and tap “⬇ Download”: the box prepares a phone-friendly MP4, then a Save link appears here. Files stay on the box for a week.` +
     (r.free_gb != null ? ` ${r.free_gb} GB free.` : '') + `</div>`;
   if (!r.jobs.length) box.innerHTML += '<div class="empty">No downloads yet</div>';
   for (const j of r.jobs) {
@@ -358,7 +360,7 @@ async function openItem(it) {
   $('#dResume').style.display = d.resume > 0 ? '' : 'none';
   $('#dResume').textContent = `Resume ${fmt(d.resume)}`;
   $('#dOrig').href = `/api/download/original/${it.type}/${it.id}`;
-  $('#dOrig').textContent = `⬇ Original (${gb(d.size || 0)})`; $('#dOrig').style.display = '';
+  $('#dOrig').textContent = `⬇ Original file (${gb(d.size || 0)})`; $('#dOrig').style.display = '';
   syncSel();
   if (d.resume > 0 && document.activeElement === $('#dPlay')) $('#dResume').focus({ preventScroll: true });
   // TV: OK on a title means "watch it" -> ask Resume / from start straight away (Back for the options)
@@ -386,8 +388,12 @@ $('#dResume').onclick = () => startPlay(cur.meta.resume);
 $('#dPrep').onclick = async () => {
   if (!cur || !cur.meta || !cur.meta.available) return;
   const audio = $('#dAudio').value === '' ? null : Number($('#dAudio').value);
+  $('#dDlMsg').textContent = 'Preparing…';
   const r = await post('/download', { type: cur.type, id: cur.id, quality: $('#dQ').value, audio, sub: $('#dSub').value || null });
-  $('#dDlMsg').textContent = r.error ? r.error : r.state === 'done' ? 'Ready in the ⬇ tab' : 'Queued, progress in the ⬇ tab';
+  if (r.error) { $('#dDlMsg').textContent = r.error; return; }
+  // show it: the Downloads list (newest first) has this title on top with progress, then a Save link
+  closeDetail();
+  setTab('dl');
 };
 
 // ---------------- Back = browser history. A TV remote's Back key (and a phone's back gesture) only
@@ -916,7 +922,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'ms-1';
+const BUILD = 'ms-2';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
