@@ -510,6 +510,55 @@ class Session:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+_VTT_TIME = re.compile(r"^(?:(\d+):)?(\d+):(\d+)\.(\d+)\s+-->\s+(?:(\d+):)?(\d+):(\d+)\.(\d+)")
+
+
+def _vtt_secs(h, m, sec, ms):
+    return int(h or 0) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000.0
+
+
+def start_subs(s, path):
+    """Read the chosen text subtitle with its exact source times (ffmpeg -copyts keeps them after the
+    input seek) and keep the cues relative to the session offset, i.e. on the player's clock (0 = the
+    first frame of the stream). Fills s.subs progressively; s.subs_done when finished."""
+    s.subs, s.subs_done = [], False
+    sel = str(s.sub_sel)
+    if sel.startswith("ext:"):
+        src = ["-i", sel[4:], "-map", "0:0"]
+    else:
+        src = ["-ss", "%.3f" % max(0.0, s.offset - 30), "-copyts", "-i", path, "-map", "0:%d" % int(sel)]
+    cmd = [CONFIG["ffmpeg_decode"], "-nostdin", "-hide_banner", "-loglevel", "error", *src,
+           "-c:s", "webvtt", "-f", "webvtt", "-"]
+
+    def run():
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+            s.procs.append(p)
+            cue = None
+            for line in p.stdout:
+                line = line.rstrip("\n")
+                m = _VTT_TIME.match(line)
+                if m:
+                    g = m.groups()
+                    cue = [_vtt_secs(*g[:4]) - s.offset, _vtt_secs(*g[4:]) - s.offset, []]
+                elif cue is not None:
+                    if line.strip():
+                        cue[2].append(line)
+                    else:
+                        if cue[1] > 0 and cue[2]:
+                            s.subs.append([round(max(0.0, cue[0]), 3), round(cue[1], 3), "\n".join(cue[2])])
+                        cue = None
+            if cue is not None and cue[1] > 0 and cue[2]:
+                s.subs.append([round(max(0.0, cue[0]), 3), round(cue[1], 3), "\n".join(cue[2])])
+            p.wait()
+        except Exception as e:
+            log("subs %s: %r" % (s.id, e))
+        finally:
+            s.subs_done = True
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 class SessionManager:
     """Streams, one per device (browser), at most max_sessions at a time. A device that starts or seeks
     replaces its own stream; a new device beyond the limit stops the stream that has been quiet longest
@@ -563,6 +612,8 @@ class SessionManager:
             s = Session(kind, ident, meta, probe, offset, audio_idx, sub_sel, mode, enc, q, client)
             os.makedirs(s.dir)
             self._launch(s, path)
+            if sub_sel:
+                start_subs(s, path)
             self.sessions[s.id] = s
             return s.info()
 
@@ -708,18 +759,11 @@ class SessionManager:
         logf = open(os.path.join(s.dir, "ffmpeg.log"), "w")
         ss = ["-ss", "%.3f" % s.offset] if s.offset > 0 else []
         pace = pace_args()
-        # audio / subtitle mapping on the encoder side (input 1 = source file, input 2 = external srt)
-        enc_inputs = ["-i", path]
+        # audio mapping (input 1 = source file). Subtitles are NOT muxed: ffmpeg's in-stream WebVTT came
+        # out 1-2 s early (cues counted from the first subtitle packet after the input seek, video from
+        # its own start); they are extracted with exact source times instead (start_subs, /api/subs)
         maps = ["-map", "1:%d" % s.audio_idx] if s.audio_idx is not None else ["-an"]
         sub_args, var_map = [], "v:0,a:0"
-        if s.sub_sel:
-            if str(s.sub_sel).startswith("ext:"):
-                enc_inputs += ["-i", str(s.sub_sel)[4:]]
-                maps += ["-map", "2:0"]
-            else:
-                maps += ["-map", "1:%d" % int(s.sub_sel)]
-            sub_args = ["-c:s", "webvtt"]
-            var_map = "v:0,a:0,s:0,sgroup:subs"
         # EVENT playlist: every segment stays until the session stops (a rolling window deleted
         # the segments a paused viewer had not reached yet, and players then jumped to the live edge)
         hls = ["-f", "hls", "-hls_time", str(CONFIG["hls_time"]), "-hls_list_size", "0",
@@ -729,27 +773,20 @@ class SessionManager:
         audio = ["-c:a", "aac", "-b:a", s.q[3], "-ac", "2"] if s.audio_idx is not None else []
         if s.mode == "remux":
             cmd = [CONFIG["ffmpeg_encode"], "-nostdin", "-hide_banner", "-loglevel", "warning", *pace, *ss,
-                   "-i", path, *(["-i", str(s.sub_sel)[4:]] if str(s.sub_sel).startswith("ext:") else []),
-                   "-map", "0:%d" % v["index"], *[m.replace("1:", "0:").replace("2:0", "1:0") for m in maps],
+                   "-i", path, "-map", "0:%d" % v["index"], *[m.replace("1:", "0:") for m in maps],
                    "-c:v", "copy", *audio, *sub_args, *hls]
             s.procs.append(subprocess.Popen(cmd, cwd=s.dir, stdout=logf, stderr=logf))
             return
         # Stages 1+2 — decode -> raw NV12 pipe -> video-only encode -> H.264 mpegts pipe
         dec, enc = transcode_cmds(path, s.probe, s.offset, s.q, s.mode, s.enc, pace)
-        # Stage 3 — mux encoded video (copy) + audio (AAC) + subtitles (WebVTT) into HLS. Mainline
-        # ffmpeg, no MPP. Input 0 = encoded video from the pipe; input 1 = source file (audio +
-        # embedded subs), seeked to the offset so it aligns with the already-offset video.
+        # Stage 3 — mux encoded video (copy) + audio (AAC) into HLS. Mainline ffmpeg, no MPP. Input 0 =
+        # encoded video from the pipe; input 1 = source file (audio), seeked to the offset so it aligns
+        # with the already-offset video.
         mss = ["-ss", "%.3f" % s.offset] if s.offset > 0 else []
         mux_inputs = ["-i", "pipe:0", *mss, "-i", path]
         mux_maps = ["-map", "0:v:0"]
         if s.audio_idx is not None:
             mux_maps += ["-map", "1:%d" % s.audio_idx]
-        if s.sub_sel:
-            if str(s.sub_sel).startswith("ext:"):
-                mux_inputs += ["-i", str(s.sub_sel)[4:]]
-                mux_maps += ["-map", "2:0"]
-            else:
-                mux_maps += ["-map", "1:%d" % int(s.sub_sel)]
         mux = [CONFIG["ffmpeg_decode"], "-nostdin", "-hide_banner", "-loglevel", "warning",
                "-fflags", "+genpts", *mux_inputs, *mux_maps,
                "-c:v", "copy", *audio, *sub_args, *hls]
@@ -783,6 +820,15 @@ class SessionManager:
             s = self.sessions[max(self.sessions, key=lambda k: self.sessions[k].started)]
             s.last_seen = time.time()   # pages from before per-device sessions poll without an id
             return s.info()
+
+    def subs(self, sid, start=0):
+        with self.lock:
+            s = self.sessions.get(sid)
+            if not s:
+                return {"cues": [], "next": start, "done": True}
+            s.last_seen = time.time()
+            cues = list(getattr(s, "subs", None) or [])
+            return {"cues": cues[start:], "next": len(cues), "done": bool(getattr(s, "subs_done", True))}
 
     def all(self):
         with self.lock:
@@ -1189,6 +1235,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("X-Accel-Redirect", "/thumbcache/" + urllib.parse.quote(os.path.basename(cpath)))
                 self.end_headers()
                 return
+            if p == "/api/subs":
+                return self.send_json(SESSIONS.subs(q.get("id", [""])[0], int(q.get("from", ["0"])[0] or 0)))
             if p == "/api/session":
                 return self.send_json(SESSIONS.status(q.get("id", [""])[0] or None))
             return self.send_json({"error": "not found"}, 404)

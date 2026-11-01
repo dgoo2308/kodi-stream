@@ -283,3 +283,12 @@ least recently, and that player shows "Stopped: another device started a stream"
 polls (and keeps alive) one stream; streams not polled for `session_idle_s` (30 min) are reaped;
 `/api/stop {session, client}` stops only your own. Pages without a client id behave as before (single
 stream). `/api/health` lists all sessions. Two parallel 720p encodes: load ~3.7 on 8 cores, ~380 MB.
+
+## Subtitles with exact timing (2026-11-01)
+In-stream WebVTT came out 1-2 s early: after the input -ss, ffmpeg counted subtitle cues from the first
+subtitle packet (+4.0 s in the measured case) while video/audio started at their own PTS (5.4 s), and
+without X-TIMESTAMP-MAP hls.js aligned on the video -> 5.4 - 4.0 = 1.4 s early (varies with keyframes).
+Now HLS carries video + audio only. `start_subs()` reads the chosen text subtitle with
+`ffmpeg -ss <offset-30> -copyts ... -c:s webvtt` (exact source times, ~1 s for a whole episode), keeps
+cues relative to the session offset (= the player clock) and serves them at `/api/subs?id=&from=`; the
+page adds them to one `<video>` text track (works with hls.js and Safari native HLS).

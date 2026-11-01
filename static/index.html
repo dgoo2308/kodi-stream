@@ -458,10 +458,38 @@ async function startPlay(at) {
   attach(res.url, at);
   clearInterval(ticker); ticker = setInterval(tick, 1000);
 }
+// Subtitles: not inside the HLS stream any more (ffmpeg's in-stream WebVTT came out 1-2 s early). The
+// box reads the cues with exact source times and serves them on the player's clock (0 = first frame
+// of this stream); they are added here to one text track on the <video>.
+let subTrack = null, subGen = 0;
+function clearSubs() {
+  subGen++;
+  if (!subTrack) return;
+  const cs = subTrack.cues;
+  if (cs) for (let i = cs.length - 1; i >= 0; i--) subTrack.removeCue(cs[i]);
+  subTrack.mode = 'hidden';
+}
+async function loadSubs(sid) {
+  clearSubs();
+  if (!sid || !$('#dSub').value) return;
+  const gen = subGen;
+  if (!subTrack) subTrack = video.addTextTrack('subtitles', 'Subtitles', 'und');
+  subTrack.mode = 'showing';
+  let from = 0;
+  while (gen === subGen) {
+    const r = await api(`/subs?id=${sid}&from=${from}`).catch(() => null);
+    if (!r || gen !== subGen) return;
+    for (const [a, b, t] of r.cues) { try { subTrack.addCue(new VTTCue(a, b, t)); } catch (e) {} }
+    from = r.next;
+    if (r.done) return;
+    await new Promise(res => setTimeout(res, 1000));
+  }
+}
 function attach(url, at) {
   if (hls) { hls.destroy(); hls = null; }
   sessEnded = false;
   const sid = (url.match(/\/hls\/([^/]+)\//) || [])[1];
+  clearSubs();
   if (mode === 'direct') { video.src = url; video.currentTime = at || 0; video.play().catch(()=>{}); return; }
   const start = () => {
     if (!(window.Hls && Hls.isSupported())) {  // iOS Safari: no MSE, native HLS
@@ -478,13 +506,13 @@ function attach(url, at) {
     hls = new Hls({ startPosition: 0, maxBufferLength: 120, maxMaxBufferLength: 600, backBufferLength: 120,
                     maxBufferSize: 200 * 1000 * 1000, enableWorker: true });
     hls.loadSource(url); hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(()=>{}); if (hls.subtitleTracks.length) hls.subtitleTrack = 0; });
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(()=>{}); });
     hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal && !sessEnded) { $('#msg').textContent = 'stream error: ' + d.type; if (d.type === 'networkError') setTimeout(() => hls && hls.startLoad(), 1500); } });
   };
   // wait for the master playlist to exist
   (async function poll(n) {
     const s = await api('/session' + (sid ? '?id=' + sid : ''));
-    if (s.ready) { sess = s; sessAt = Date.now(); return start(); }
+    if (s.ready) { sess = s; sessAt = Date.now(); loadSubs(sid); return start(); }
     if (!s.alive) { $('#msg').textContent = 'encoder stopped: ' + (s.error || 'see log'); return; }
     if (n < 40) setTimeout(() => poll(n+1), 500); else $('#msg').textContent = 'timeout waiting for stream';
   })(0);
@@ -543,6 +571,7 @@ async function stopPlay(fromHistory) {
   if (!fromHistory) dropLayer('player');
   saveProgress(); clearInterval(ticker); if (hls) { hls.destroy(); hls = null; } video.pause(); video.removeAttribute('src'); video.load();
   const sid = sess && sess.session;
+  clearSubs();
   sess = null; $('#player').classList.remove('on'); await post('/stop', { session: sid, client: CLIENT });
   const key = cur.type + cur.id; await load(!showId); focusCard(key);
 }
@@ -922,7 +951,7 @@ setTab('movie').then(() => { if (document.documentElement.classList.contains('tv
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'ms-2';
+const BUILD = 'subs-1';
 async function checkBuild() {
   if (playerOn() || menuOpen() || detailOn()) return;
   try {
