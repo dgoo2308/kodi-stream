@@ -16,11 +16,13 @@ iOS-Keychain-friendly cookie login. Companion to [torrent-adder](https://github.
   (⬇ tab, pruned after a week).
 - **Player** (single page, `static/index.html` + vendored hls.js): full-movie seek, ±skip, audio &
   subtitle pickers, fullscreen, auto-hiding controls; seeking/track-change restart the transcode at the point.
-- **Resume + watched** shared with Kodi (JSON-RPC when Kodi runs, the library DB `bookmark`/`files`
-  rows when it does not), both directions.
-- **Access**: reverse-proxied via frp to a VPS; sign in with a passkey (Face ID), or scan the QR code on a
-  TV/tablet with your signed-in phone; every device is listed and revocable at `/_devices` (`vps/`). At home: `http://kodi.local` (avahi mDNS), no login, private
-  IPv4 ranges only (`nginx-kodi-stream-lan.conf`, a separate server block so the frp target is untouched).
+- **Resume + watched** shared with Kodi for the owner (JSON-RPC when Kodi runs, the library DB
+  `bookmark`/`files` rows when it does not); every other signed-in person has their own progress.
+- **Access**: reverse-proxied via frp to the nell_remote VPS behind the Nellika sign-in
+  ([nellika-auth](https://github.com/dgoo2308/nellika-auth), auth.nellika.io: passkeys, TV sign-in with
+  your phone, invite-only accounts, revocable devices). At home: `http://kodi.local` (avahi mDNS), no
+  login, private IPv4 ranges only (`nginx-kodi-stream-lan.conf`, a separate server block so the frp
+  target is untouched; it drops any client `X-Auth-*` header, so home devices count as the owner).
 
 ## Encoder note (important)
 Video is encoded with **software x264** by default. The RK3588 VEPU580 hardware encoder was
@@ -36,17 +38,21 @@ Full investigation and decisions: [`docs/kodi-stream.md`](docs/kodi-stream.md).
 - `nginx-kodi-stream.conf` — box nginx site for the frp tunnel (127.0.0.1:8088: static + `/hls/` + `/api/` proxy + internal `/media/`, `/thumbcache/`, `/dlcache/`).
 - `nginx-kodi-stream-lan.conf` — box nginx site for the LAN (`:80`, `kodi.local`); same locations, keep the two in step.
 - `kodi-stream.service` — systemd unit (user `pi`, memory/CPU caps).
-- `vps/` — VPS side: `stream-auth.py` (cookie login), its unit, and the `stream.nellika.io` nginx vhost.
+- `vps/` — VPS side: the `stream.nellika.io` nginx vhost (`include`s the nellika-auth snippets) and
+  `vps/deploy.sh`. The sign-in service itself lives in [nellika-auth](https://github.com/dgoo2308/nellika-auth)
+  (`~/git/nellika-auth`).
 
 ## Deploy (summary)
 Box: copy `stream-api.py` + `static/` to `/opt/kodi-stream/`, install the nginx site and systemd unit,
 `systemctl enable --now kodi-stream`. LAN: `nginx-kodi-stream-lan.conf` → `/etc/nginx/sites-available/kodi-stream-lan`,
-symlink into `sites-enabled`, `nginx -t && systemctl reload nginx`. VPS: `vps/stream-auth.py` to `/opt/stream-auth/`, its unit,
-generate `/etc/stream-auth.key`, install the nginx vhost. See `docs/kodi-stream.md` for the full runbook.
+symlink into `sites-enabled`, `nginx -t && systemctl reload nginx` (all of this: `scripts/deploy.sh`).
+VPS: deploy nellika-auth first (`~/git/nellika-auth/deploy.sh`), then the vhost with `vps/deploy.sh`.
+See `docs/kodi-stream.md` for the full runbook.
 
 ## Related
 - [kodi-h265-nanopi-t6](https://github.com/dgoo2308/kodi-h265-nanopi-t6) — the NanoPC-T6 (RK3588) Kodi
   build this streams from: reproducible Kodi master + ffmpeg-rockchip, HEVC 10-bit, mainline 6.19
   V4L2 decode, VEPU580 encoder. The box's working notebook.
+- [nellika-auth](https://github.com/dgoo2308/nellika-auth) — the Nellika sign-in (auth.nellika.io) this uses.
 - [torrent-adder](https://github.com/dgoo2308/torrent-adder) — companion web app on the same box/tunnel.
 - [kodi-mcp-server](https://github.com/dgoo2308/kodi-mcp-server) — MCP server for Kodi integration.

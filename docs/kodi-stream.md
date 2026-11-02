@@ -292,3 +292,10 @@ Now HLS carries video + audio only. `start_subs()` reads the chosen text subtitl
 `ffmpeg -ss <offset-30> -copyts ... -c:s webvtt` (exact source times, ~1 s for a whole episode), keeps
 cues relative to the session offset (= the player clock) and serves them at `/api/subs?id=&from=`; the
 page adds them to one `<video>` text track (works with hls.js and Safari native HLS).
+
+## Sign-in moved to its own repo (2026-11-02)
+The universal sign-in (nellika-auth: service, nginx snippets, auth.nellika.io vhost, deploy, tests, docs)
+now lives in [nellika-auth](https://github.com/dgoo2308/nellika-auth) (`~/git/nellika-auth`), split off at
+kodi-stream `fe7d3b0`. This repo keeps only the stream.nellika.io vhost (`vps/stream.nellika.io.conf`,
+deployed with `vps/deploy.sh`, which refuses until nellika-auth is installed) and the per-person progress
+in `stream-api.py`. The sections above about stream-auth / sign-in v2 are history.
