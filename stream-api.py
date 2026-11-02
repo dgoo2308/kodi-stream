@@ -53,6 +53,10 @@ CONFIG = {
     # parallel streams (one per device): beyond this the device that has been quiet longest is stopped;
     # a stream nobody polled for session_idle_s (tab closed, phone put away) is stopped as well
     "max_sessions": 2,
+    # Nellika sign-in passes X-Auth-User. The owner (and the LAN site, which has no sign-in) uses Kodi's own
+    # resume points / watched marks; everyone else keeps their own here, so they never move Kodi's.
+    "owner_user": "danny",
+    "progress_db": "/home/pi/kodi-stream-progress.db",
     "session_idle_s": 1800,
     # selectable stream/download quality: name -> [max width, video bitrate, audio bitrate]
     "qualities": {"720p": [1280, "2500k", "128k"], "540p": [960, "1200k", "96k"], "360p": [640, "600k", "64k"]},
@@ -143,11 +147,16 @@ def _catalogue_filters(alias, idcol, media_type, q, genre, unwatched_sql, unwatc
     return "".join(" AND " + w for w in where), args
 
 
-def movies(q="", limit=60, offset=0, sort="added", genre="", unwatched=False):
-    where, args = _catalogue_filters("m", "idMovie", "movie", q, genre,
-                                     "(m.playCount IS NULL OR m.playCount = 0)", unwatched)
+def movies(q="", limit=60, offset=0, sort="added", genre="", unwatched=False, user=None):
+    watched_sql, watched_args = "(m.playCount IS NULL OR m.playCount = 0)", []
+    if unwatched and not is_owner(user):
+        ids = [r["id"] for r in progress_rows(user, "movie") if r["plays"]]
+        watched_sql, watched_args = "m.idMovie NOT IN (%s)" % ",".join("?" * len(ids)) if ids else "1=1", ids
+    where, args = _catalogue_filters("m", "idMovie", "movie", q, genre, watched_sql, unwatched)
+    if unwatched:
+        args = args + watched_args
     order = SORTS.get(sort, SORTS["added"]).format(a="m", y="m.premiered")
-    return _proxy_posters(rows(
+    return overlay(_proxy_posters(rows(
         """SELECT m.idMovie AS id, 'movie' AS type, m.idFile, m.c00 AS title,
                   substr(m.premiered,1,4) AS year, m.c11 AS runtime, m.c14 AS genre,
                   round(m.rating, 1) AS rating,
@@ -159,14 +168,19 @@ def movies(q="", limit=60, offset=0, sort="added", genre="", unwatched=False):
            WHERE 1=1""" + MOVIE_VIEW_DEFAULT_FILTER + where + """
            ORDER BY """ + order + """
            LIMIT ? OFFSET ?""",
-        (*args, max(1, min(limit, MAX_LIMIT)), max(0, offset))))
+        (*args, max(1, min(limit, MAX_LIMIT)), max(0, offset)))), user)
 
 
-def shows(q="", limit=100, offset=0, sort="added", genre="", unwatched=False):
-    where, args = _catalogue_filters("s", "idShow", "tvshow", q, genre,
-                                     "s.watchedcount < s.totalCount", unwatched)
+def shows(q="", limit=100, offset=0, sort="added", genre="", unwatched=False, user=None):
+    watched_sql, watched_args = "s.watchedcount < s.totalCount", []
+    if unwatched and not is_owner(user):
+        done = fully_watched_shows(user)
+        watched_sql, watched_args = "s.idShow NOT IN (%s)" % ",".join("?" * len(done)) if done else "1=1", done
+    where, args = _catalogue_filters("s", "idShow", "tvshow", q, genre, watched_sql, unwatched)
+    if unwatched:
+        args = args + watched_args
     order = SORTS.get(sort, SORTS["added"]).format(a="s", y="s.c05")
-    return _proxy_posters(rows(
+    return overlay(_proxy_posters(rows(
         """SELECT s.idShow AS id, 'show' AS type, s.c00 AS title, substr(s.c05,1,4) AS year,
                   s.c08 AS genre, round(s.rating, 1) AS rating,
                   s.totalCount, s.watchedcount, s.totalSeasons, s.dateAdded,
@@ -175,7 +189,7 @@ def shows(q="", limit=100, offset=0, sort="added", genre="", unwatched=False):
            WHERE 1=1""" + where + """
            ORDER BY """ + order + """
            LIMIT ? OFFSET ?""",
-        (*args, max(1, min(limit, MAX_LIMIT)), max(0, offset))))
+        (*args, max(1, min(limit, MAX_LIMIT)), max(0, offset)))), user)
 
 
 def genres(media_type):
@@ -184,8 +198,8 @@ def genres(media_type):
                    WHERE gl.media_type = ? GROUP BY g.name ORDER BY count DESC, g.name""", (media_type,))
 
 
-def episodes(show_id):
-    return _proxy_posters(rows(
+def episodes(show_id, user=None):
+    return overlay(_proxy_posters(rows(
         """SELECT e.idEpisode AS id, 'episode' AS type, e.idFile, e.c00 AS title,
                   CAST(e.c12 AS INTEGER) AS season, CAST(e.c13 AS INTEGER) AS episode,
                   e.strTitle AS show, e.strPath||e.strFileName AS path,
@@ -193,22 +207,93 @@ def episodes(show_id):
                   (SELECT url FROM art WHERE media_type='episode' AND media_id=e.idEpisode AND type='thumb') AS poster
            FROM episode_view e WHERE e.idShow = ?
            ORDER BY season, episode""",
-        (show_id,)))
+        (show_id,))), user)
 
 
-def item(kind, ident):
+def item(kind, ident, user=None):
     if kind == "movie":
         r = rows("SELECT m.idMovie AS id, 'movie' AS type, m.idFile, m.c00 AS title, substr(m.premiered,1,4) AS year,"
                  " m.strPath||m.strFileName AS path, m.resumeTimeInSeconds AS resume, m.totalTimeInSeconds AS total,"
                  " m.playCount FROM movie_view m WHERE m.idMovie = ?" + MOVIE_VIEW_DEFAULT_FILTER, (ident,))
     elif kind == "episode":
         r = rows("SELECT e.idEpisode AS id, 'episode' AS type, e.idFile, e.c00 AS title, e.strTitle AS show,"
-                 " CAST(e.c12 AS INTEGER) AS season, CAST(e.c13 AS INTEGER) AS episode,"
+                 " CAST(e.c12 AS INTEGER) AS season, CAST(e.c13 AS INTEGER) AS episode, e.idShow AS showId,"
                  " e.strPath||e.strFileName AS path, e.resumeTimeInSeconds AS resume, e.totalTimeInSeconds AS total,"
                  " e.playCount FROM episode_view e WHERE e.idEpisode = ?", (ident,))
     else:
         r = []
-    return r[0] if r else None
+    return overlay(r, user)[0] if r else None
+
+
+# ----------------------------------------------------------------------------- per-person progress
+def is_owner(user):
+    return not user or user == CONFIG["owner_user"]
+
+
+_progress_lock = threading.Lock()
+
+
+def progress_q(sql, args=()):
+    with _progress_lock:
+        con = sqlite3.connect(CONFIG["progress_db"], timeout=5)
+        con.row_factory = sqlite3.Row
+        try:
+            with con:
+                con.execute("""CREATE TABLE IF NOT EXISTS progress (user TEXT NOT NULL, kind TEXT NOT NULL,
+                    id INTEGER NOT NULL, show_id INTEGER, position REAL DEFAULT 0, total REAL DEFAULT 0,
+                    plays INTEGER DEFAULT 0, last_played TEXT, PRIMARY KEY (user, kind, id))""")
+                return [dict(r) for r in con.execute(sql, args).fetchall()]
+        finally:
+            con.close()
+
+
+def progress_rows(user, kind):
+    return progress_q("SELECT * FROM progress WHERE user=? AND kind=?", (user, kind))
+
+
+def fully_watched_shows(user):
+    seen = {}
+    for r in progress_q("SELECT show_id, count(*) AS n FROM progress WHERE user=? AND kind='episode' AND plays>0 "
+                        "GROUP BY show_id", (user,)):
+        seen[r["show_id"]] = r["n"]
+    if not seen:
+        return []
+    totals = rows("SELECT idShow AS id, totalCount FROM tvshow_view WHERE idShow IN (%s)" % ",".join("?" * len(seen)),
+                  tuple(seen))
+    return [t["id"] for t in totals if seen.get(t["id"], 0) >= (t["totalCount"] or 0) > 0]
+
+
+def overlay(items, user):
+    """Swap Kodi's resume / watched values for this person's own (owner: Kodi's stay)."""
+    if is_owner(user) or not items:
+        return items
+    mine = {(r["kind"], r["id"]): r for r in progress_q("SELECT * FROM progress WHERE user=?", (user,))}
+    per_show = {}
+    for r in mine.values():
+        if r["kind"] == "episode" and r["plays"]:
+            per_show[r["show_id"]] = per_show.get(r["show_id"], 0) + 1
+    for it in items:
+        if it.get("type") == "show":
+            it["watchedcount"] = per_show.get(it["id"], 0)
+            continue
+        r = mine.get((it.get("type"), it.get("id")))
+        it["resume"] = r["position"] if r else 0
+        it["playCount"] = r["plays"] if r else 0
+        it["lastPlayed"] = r["last_played"] if r else None
+        if r and r["total"]:
+            it["total"] = r["total"]
+    return items
+
+
+def save_user_progress(user, kind, ident, position, duration, meta):
+    finished = duration and position >= 0.9 * duration
+    progress_q("""INSERT INTO progress (user, kind, id, show_id, position, total, plays, last_played)
+                  VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))
+                  ON CONFLICT(user, kind, id) DO UPDATE SET position=excluded.position, total=excluded.total,
+                    plays=plays + excluded.plays, last_played=excluded.last_played""",
+               (user, kind, ident, meta.get("showId"), 0 if finished else int(position),
+                int(duration or meta.get("total") or 0), 1 if finished else 0))
+    return {"ok": True, "via": "user", "user": user, "resume": {"position": 0 if finished else int(position)}}
 
 
 # ----------------------------------------------------------------------------- thumbnails
@@ -1068,10 +1153,12 @@ def kodi_rpc(method, params):
         return json.loads(r.read().decode())
 
 
-def save_progress(kind, ident, position, duration):
+def save_progress(kind, ident, position, duration, user=None):
     meta = item(kind, ident)
     if not meta:
         return {"ok": False, "error": "unknown item"}
+    if not is_owner(user):
+        return save_user_progress(user, kind, ident, position, duration, meta)
     finished = duration and position >= 0.9 * duration
     resume = {"position": 0 if finished else int(position), "total": int(duration or meta.get("total") or 0)}
     try:
@@ -1140,6 +1227,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log("%s %s" % (self.address_string(), fmt % args))
 
+    def user(self):
+        """Signed-in person (Nellika sign-in header); '' on the LAN site = the owner."""
+        u = (self.headers.get("X-Auth-User") or "").strip().lower()
+        return u if re.match(r"^[a-z0-9][a-z0-9._-]{0,31}$", u) else ""
+
     def send_json(self, obj, code=200):
         body = json.dumps(obj).encode()
         self.send_response(code)
@@ -1162,19 +1254,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "db": os.path.basename(db_path()), "session": SESSIONS.status(),
                                        "sessions": SESSIONS.all(),
                                        "mem_available_kb": mem_available_kb()})
+            if p == "/api/me":
+                return self.send_json({"user": self.user() or CONFIG["owner_user"],
+                                       "name": urllib.parse.unquote(self.headers.get("X-Auth-Name") or "")})
             if p in ("/api/movies", "/api/shows"):
                 arg = lambda k, d="": q.get(k, [d])[0]
                 fn = movies if p == "/api/movies" else shows
                 return self.send_json(fn(arg("q"), int(arg("limit", 60)), int(arg("offset", 0)),
-                                         arg("sort", "added"), arg("genre"), arg("unwatched") == "1"))
+                                         arg("sort", "added"), arg("genre"), arg("unwatched") == "1", self.user()))
             if p == "/api/genres":
                 return self.send_json(genres("tvshow" if q.get("type", ["movie"])[0] in ("tvshow", "show") else "movie"))
             m = re.match(r"^/api/shows/(\d+)/episodes$", p)
             if m:
-                return self.send_json(episodes(int(m.group(1))))
+                return self.send_json(episodes(int(m.group(1)), self.user()))
             m = re.match(r"^/api/item/(movie|episode)/(\d+)$", p)
             if m:
-                meta = item(m.group(1), int(m.group(2)))
+                meta = item(m.group(1), int(m.group(2)), self.user())
                 if not meta:
                     return self.send_json({"error": "not found"}, 404)
                 available = os.path.exists(meta["path"])
@@ -1264,8 +1359,8 @@ class Handler(BaseHTTPRequestHandler):
                 SESSIONS.stop(str(body.get("session") or "") or None, str(body.get("client") or "")[:64] or None)
                 return self.send_json({"ok": True})
             if p == "/api/progress":
-                return self.send_json(save_progress(body["type"], int(body["id"]),
-                                                    float(body.get("position") or 0), float(body.get("duration") or 0)))
+                return self.send_json(save_progress(body["type"], int(body["id"]), float(body.get("position") or 0),
+                                                    float(body.get("duration") or 0), self.user()))
             return self.send_json({"error": "not found"}, 404)
         except Exception as e:
             log("POST %s failed: %r" % (p, e))

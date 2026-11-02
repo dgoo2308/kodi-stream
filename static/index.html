@@ -129,7 +129,7 @@
     <select id="fGenre" title="Genre"><option value="">All genres</option></select>
     <label><input type="checkbox" id="fUnw"> Unwatched</label>
   </div>
-  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇<span class="lbl"> Downloads</span></button><a id="acct" class="acct" href="/_devices" title="My devices / sign in a TV" style="display:none">👤</a></div>
+  <div class="tabs"><button id="tabM" class="on">Movies</button><button id="tabS">Shows</button><button id="tabD" title="Downloads">⬇<span class="lbl"> Downloads</span></button><a id="acct" class="acct" href="https://auth.nellika.io/devices" title="My account: devices, sign in a TV" style="display:none">👤</a></div>
 </header>
 <div id="tvtip" style="display:none"></div>
 <div id="tvstart" style="display:none"><div>Press <b>OK</b> to start</div><small>then ⏪ ⏩ select · OK / ▶ opens · Back closes</small></div>
@@ -949,12 +949,16 @@ document.addEventListener('keydown', e => {
 video.onended = () => { saveProgress(); };
 window.addEventListener('pagehide', () => { if ($('#player').classList.contains('on')) saveProgress(true); });
 // device list / phone sign-in only exist behind the VPS login, not on the LAN site
-if (/(^|\.)nellika\.io$/.test(location.hostname)) $('#acct').style.display = '';
+// behind the Nellika sign-in: account link (auth.nellika.io) with who is signed in
+if (/(^|\.)nellika\.io$/.test(location.hostname)) {
+  $('#acct').style.display = '';
+  api('/me').then(m => { if (m && m.name) $('#acct').title = m.name + ': devices, sign in a TV, people'; }).catch(() => {});
+}
 setTab('movie').then(() => { if (document.documentElement.classList.contains('tv')) focusCard(); });
 // TV browsers keep serving the page from memory (history / back-forward cache), so a deployed fix may
 // never arrive: every 2 minutes, and when the page is shown again, compare this build with the server's
 // and reload when it changed (never during playback or with a menu open).
-const BUILD = 'subs-2';
+const BUILD = 'nauth-1';
 async function checkBuild(beforePlay) {
   if (!beforePlay && (playerOn() || menuOpen() || detailOn())) return false;
   try {
