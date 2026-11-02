@@ -19,7 +19,7 @@ iOS-Keychain-friendly cookie login. Companion to [torrent-adder](https://github.
 - **Resume + watched** shared with Kodi for the owner (JSON-RPC when Kodi runs, the library DB
   `bookmark`/`files` rows when it does not); every other signed-in person has their own progress.
 - **Access**: reverse-proxied via frp to the nell_remote VPS behind the Nellika sign-in
-  ([nellika-auth](https://github.com/dgoo2308/nellika-auth), auth.nellika.io: passkeys, TV sign-in with
+  ([nellika-auth](https://github.com/Nellika-Scratch-Pad/nellika-auth), auth.nellika.io: passkeys, TV sign-in with
   your phone, invite-only accounts, revocable devices). At home: `http://kodi.local` (avahi mDNS), no
   login, private IPv4 ranges only (`nginx-kodi-stream-lan.conf`, a separate server block so the frp
   target is untouched; it drops any client `X-Auth-*` header, so home devices count as the owner).
@@ -39,7 +39,7 @@ Full investigation and decisions: [`docs/kodi-stream.md`](docs/kodi-stream.md).
 - `nginx-kodi-stream-lan.conf` — box nginx site for the LAN (`:80`, `kodi.local`); same locations, keep the two in step.
 - `kodi-stream.service` — systemd unit (user `pi`, memory/CPU caps).
 - `vps/` — VPS side: the `stream.nellika.io` nginx vhost (`include`s the nellika-auth snippets) and
-  `vps/deploy.sh`. The sign-in service itself lives in [nellika-auth](https://github.com/dgoo2308/nellika-auth)
+  `vps/deploy.sh`. The sign-in service itself lives in [nellika-auth](https://github.com/Nellika-Scratch-Pad/nellika-auth)
   (`~/git/nellika-auth`).
 
 ## Deploy (summary)
@@ -53,6 +53,6 @@ See `docs/kodi-stream.md` for the full runbook.
 - [kodi-h265-nanopi-t6](https://github.com/dgoo2308/kodi-h265-nanopi-t6) — the NanoPC-T6 (RK3588) Kodi
   build this streams from: reproducible Kodi master + ffmpeg-rockchip, HEVC 10-bit, mainline 6.19
   V4L2 decode, VEPU580 encoder. The box's working notebook.
-- [nellika-auth](https://github.com/dgoo2308/nellika-auth) — the Nellika sign-in (auth.nellika.io) this uses.
+- [nellika-auth](https://github.com/Nellika-Scratch-Pad/nellika-auth) — the Nellika sign-in (auth.nellika.io) this uses.
 - [torrent-adder](https://github.com/dgoo2308/torrent-adder) — companion web app on the same box/tunnel.
 - [kodi-mcp-server](https://github.com/dgoo2308/kodi-mcp-server) — MCP server for Kodi integration.
